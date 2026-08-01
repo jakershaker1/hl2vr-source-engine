@@ -34,6 +34,14 @@
         <!-- Pico -->
         <meta-data android:name="pvr.app.type" android:value="vr" />
 
+        <!-- Android XR (Samsung Galaxy XR / Google): grants the app's linker
+             namespace permission to dlopen the platform's system OpenXR
+             runtime. Without this, xrCreateInstance fails with
+             XR_ERROR_RUNTIME_UNAVAILABLE - the loader finds
+             /system/etc/openxr/1/active_runtime.json but the linker refuses
+             to load the runtime library it points to. -->
+        <uses-native-library android:name="libopenxr.google.so" android:required="false" />
+
         <activity android:name="android.app.NativeActivity"
             android:label="@string/app_name"
             android:screenOrientation="landscape"

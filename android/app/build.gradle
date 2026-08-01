@@ -8,6 +8,7 @@ plugins {
 // into the jniLibs source set before packaging.
 def engineBuildDir = file("${rootDir}/../build")
 def vendoredLibsDir = file("${rootDir}/../prebuilt/android/aarch64")
+def thirdPartyLibsDir = file("${rootDir}/../lib/android/aarch64")
 def jniLibsDir = file("${projectDir}/src/main/jniLibs/arm64-v8a")
 
 tasks.register('copyEngineLibs', Copy) {
@@ -16,6 +17,9 @@ tasks.register('copyEngineLibs', Copy) {
     }
     from(vendoredLibsDir) {
         include '*.so' // e.g. libopenxr_loader.so - prebuilt deps not produced by waf
+    }
+    from(thirdPartyLibsDir) {
+        include '*.so' // e.g. libSDL2.so - prebuilt runtime deps the engine dynamically links against
     }
     eachFile { it.path = it.name } // flatten into a single directory
     includeEmptyDirs = false
