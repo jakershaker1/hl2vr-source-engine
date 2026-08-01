@@ -37,3 +37,14 @@ waf3*/
 .vscode/
 .depproj/
 source-engine.sln
+
+# Android/Gradle
+android/local.properties
+android/.gradle/
+android/.idea/
+android/app/build/
+android/app/src/main/jniLibs/
+android/gradle/wrapper/gradle-wrapper.jar
+*.apk
+*.aab
+*.keystore

@@ -24,14 +24,19 @@ def build(bld):
 		'../public/tier0/memoverride.cpp'
 	]
 
+	linkflags = []
 	if bld.env.DEST_OS == 'android':
 		source += [
 			'android/main.cpp',
-			'android/crashhandler.cpp'
+			'android/crashhandler.cpp',
+			'android/android_native_app_glue.c',
+			'android/android_main.cpp',
 		]
+		linkflags += ['-landroid', '-llog', '-u', 'ANativeActivity_onCreate']
 
 	includes = [
 		'.',
+		'android',
 		'android/libunwind',
 		'../public',
 		'../public/tier0',
@@ -56,6 +61,7 @@ def build(bld):
 		includes = includes,
 		defines  = defines,
 		use      = libs,
+		linkflags = linkflags,
 		install_path = install_path,
 		subsystem = bld.env.MSVC_SUBSYSTEM,
 		idx      = bld.get_taskgen_count()
