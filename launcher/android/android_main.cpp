@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "openxr_bootstrap.h"
+
 extern "C" int LauncherMainAndroid( int argc, char **argv ); // launcher/android/main.cpp
 
 namespace
@@ -74,6 +76,10 @@ void android_main( struct android_app *app )
 	g_pAndroidApp = app;
 	app->onAppCmd = HandleAppCmd;
 	app->onInputEvent = HandleInputEvent;
+
+	// Loader init / instance / system query only - no session yet (needs a
+	// Vulkan device, see task #6/#7). Doesn't require a native window.
+	InitOpenXR( app );
 
 	while ( true )
 	{

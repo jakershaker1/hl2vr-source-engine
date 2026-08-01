@@ -7,3 +7,6 @@
 [submodule "lib"]
 	path = lib
 	url = https://github.com/nillerusr/source-engine-libs.git
+[submodule "openxr_sdk"]
+	path = openxr_sdk
+	url = https://github.com/KhronosGroup/OpenXR-SDK.git

@@ -508,6 +508,8 @@ def configure(conf):
 
 	if conf.env.DEST_OS != 'win32':
 		flags += ['-pipe', '-fPIC', '-L'+os.path.abspath('.')+'/lib/'+conf.env.DEST_OS+'/'+conf.env.DEST_CPU+'/']
+		# Prebuilt deps that live in our own repo, not the (third-party, read-only) lib/ submodule.
+		flags += ['-L'+os.path.abspath('.')+'/prebuilt/'+conf.env.DEST_OS+'/'+conf.env.DEST_CPU+'/']
 	if conf.env.COMPILER_CC != 'msvc':
 		flags += ['-pthread']
 
