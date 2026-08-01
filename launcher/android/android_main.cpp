@@ -2,16 +2,18 @@
 //
 // NativeActivity entry point for the Android/VR port.
 //
-// Bridges Android's native_app_glue lifecycle into the engine's existing
-// Android launcher entry point (LauncherMainAndroid, see main.cpp). This
+// Bridges Android's native_app_glue lifecycle into OpenXR + a minimal
+// Vulkan presentation loop (see openxr_bootstrap.*, vr_session.*). This
 // replaces the old SDL Java-Activity/JNI bridge (ValveActivity2) with a
 // plain android.app.NativeActivity, since VR runtimes (OpenXR) expect to
 // drive the native window/session lifecycle directly rather than through
 // an SDL-owned Activity.
 //
-// This is scaffolding: it gets the engine process started once a native
-// window exists. OpenXR session creation and the render loop are wired up
-// separately once a Vulkan renderer backend exists.
+// The VR session here is a standalone visual-validation path (clears each
+// eye to an animated color) - it is not yet wired into the engine's
+// materialsystem/shaderapi, which is a much larger follow-up. The real
+// engine entry point (LauncherMainAndroid) is defined here but not called
+// yet for that reason.
 //
 //===========================================================================//
 
@@ -22,18 +24,27 @@
 #include <unistd.h>
 
 #include "openxr_bootstrap.h"
+#include "vr_session.h"
 
 extern "C" int LauncherMainAndroid( int argc, char **argv ); // launcher/android/main.cpp
 
 namespace
 {
 	struct android_app *g_pAndroidApp;
-	pthread_t g_engineThread;
-	bool g_bEngineStarted;
+	pthread_t g_vrThread;
+	bool g_bVrStarted;
 
-	void *EngineThreadMain( void * )
+	struct VrThreadArgs
 	{
-		LauncherMainAndroid( 0, NULL );
+		XrInstance instance;
+		XrSystemId systemId;
+	};
+
+	void *VrThreadEntry( void *pArg )
+	{
+		VrThreadArgs *args = (VrThreadArgs *)pArg;
+		RunVRSession( g_pAndroidApp, args->instance, args->systemId );
+		delete args;
 		return NULL;
 	}
 
@@ -42,15 +53,8 @@ namespace
 		switch ( cmd )
 		{
 		case APP_CMD_INIT_WINDOW:
-			// The native window is ready. Start the engine on its own thread so
-			// this thread can keep pumping the Android event loop - the engine's
-			// main loop isn't written to interleave with ALooper polling.
-			if ( app->window != NULL && !g_bEngineStarted )
-			{
-				g_bEngineStarted = true;
+			if ( app->window != NULL )
 				setenv( "APP_DATA_PATH", app->activity->internalDataPath, 1 );
-				pthread_create( &g_engineThread, NULL, EngineThreadMain, NULL );
-			}
 			break;
 
 		case APP_CMD_DESTROY:
@@ -77,17 +81,21 @@ void android_main( struct android_app *app )
 	app->onAppCmd = HandleAppCmd;
 	app->onInputEvent = HandleInputEvent;
 
-	// Loader init / instance / system query only - no session yet (needs a
-	// Vulkan device, see task #6/#7). Doesn't require a native window.
-	InitOpenXR( app );
+	XrInstance instance = XR_NULL_HANDLE;
+	XrSystemId systemId = XR_NULL_SYSTEM_ID;
+	if ( InitOpenXR( app, &instance, &systemId ) )
+	{
+		VrThreadArgs *args = new VrThreadArgs{ instance, systemId };
+		g_bVrStarted = true;
+		pthread_create( &g_vrThread, NULL, VrThreadEntry, args );
+	}
 
 	while ( true )
 	{
 		int events;
 		struct android_poll_source *source;
 
-		int timeoutMs = g_bEngineStarted ? -1 : 0;
-		while ( ALooper_pollOnce( timeoutMs, NULL, &events, (void **)&source ) >= 0 )
+		while ( ALooper_pollOnce( 0, NULL, &events, (void **)&source ) >= 0 )
 		{
 			if ( source != NULL )
 				source->process( app, source );

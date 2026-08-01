@@ -47,10 +47,11 @@ def build(bld):
 			'android/android_native_app_glue.c',
 			'android/android_main.cpp',
 			'android/openxr_bootstrap.cpp',
+			'android/vr_session.cpp',
 		]
 		includes += ['../openxr_sdk/include']
 		libs += ['OPENXR']
-		linkflags += ['-landroid', '-llog', '-u', 'ANativeActivity_onCreate']
+		linkflags += ['-landroid', '-llog', '-lvulkan', '-u', 'ANativeActivity_onCreate']
 
 	defines = []
 
