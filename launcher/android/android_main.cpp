@@ -9,18 +9,21 @@
 // drive the native window/session lifecycle directly rather than through
 // an SDL-owned Activity.
 //
-// The VR session here is a standalone visual-validation path (clears each
-// eye to an animated color) - it is not yet wired into the engine's
-// materialsystem/shaderapi, which is a much larger follow-up. The real
-// engine entry point (LauncherMainAndroid) is defined here but not called
-// yet for that reason.
+// The VR session (openxr_bootstrap/vr_session) is a standalone
+// visual-validation path (clears each eye to an animated color) - it is
+// not yet wired into the engine's materialsystem/shaderapi (that's tracked
+// separately). The real engine entry point (LauncherMainAndroid) is also
+// started here, on its own thread, so we can see how far engine init gets
+// (e.g. locating HL2 game content) independent of the VR render path.
 //
 //===========================================================================//
 
 #include <android/log.h>
 #include <android_native_app_glue.h>
+#include <jni.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "openxr_bootstrap.h"
@@ -32,7 +35,9 @@ namespace
 {
 	struct android_app *g_pAndroidApp;
 	pthread_t g_vrThread;
+	pthread_t g_engineThread;
 	bool g_bVrStarted;
+	bool g_bEngineStarted;
 
 	struct VrThreadArgs
 	{
@@ -48,13 +53,63 @@ namespace
 		return NULL;
 	}
 
+	void *EngineThreadEntry( void * )
+	{
+		LauncherMainAndroid( 0, NULL );
+		return NULL;
+	}
+
+	// Tier1's module loader (tier1/interface.cpp Sys_LoadModule) resolves engine
+	// .so's like filesystem_stdio.so via stat() against $APP_LIB_PATH, not via
+	// the dynamic linker's own search path. ANativeActivity doesn't expose the
+	// APK's native library directory directly, so fetch it from
+	// ApplicationInfo.nativeLibraryDir over JNI.
+	bool SetAppLibPathEnv( struct android_app *app )
+	{
+		JNIEnv *env = NULL;
+		if ( app->activity->vm->AttachCurrentThread( &env, NULL ) != JNI_OK || env == NULL )
+			return false;
+
+		bool ok = false;
+		jclass activityClass = env->GetObjectClass( app->activity->clazz );
+		jmethodID getApplicationInfo = env->GetMethodID( activityClass, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;" );
+		jobject appInfo = env->CallObjectMethod( app->activity->clazz, getApplicationInfo );
+		if ( appInfo != NULL )
+		{
+			jclass appInfoClass = env->GetObjectClass( appInfo );
+			jfieldID nativeLibraryDirField = env->GetFieldID( appInfoClass, "nativeLibraryDir", "Ljava/lang/String;" );
+			jstring nativeLibraryDir = (jstring)env->GetObjectField( appInfo, nativeLibraryDirField );
+			if ( nativeLibraryDir != NULL )
+			{
+				const char *path = env->GetStringUTFChars( nativeLibraryDir, NULL );
+				setenv( "APP_LIB_PATH", path, 1 );
+				__android_log_print( ANDROID_LOG_INFO, "hl2vr", "APP_LIB_PATH=%s", path );
+				env->ReleaseStringUTFChars( nativeLibraryDir, path );
+				ok = true;
+			}
+		}
+
+		if ( env->ExceptionCheck() )
+			env->ExceptionClear();
+
+		app->activity->vm->DetachCurrentThread();
+		return ok;
+	}
+
 	void HandleAppCmd( struct android_app *app, int32_t cmd )
 	{
 		switch ( cmd )
 		{
 		case APP_CMD_INIT_WINDOW:
-			if ( app->window != NULL )
+			if ( app->window != NULL && !g_bEngineStarted )
+			{
+				g_bEngineStarted = true;
 				setenv( "APP_DATA_PATH", app->activity->internalDataPath, 1 );
+				// GetBaseDirectory() (launcher.cpp) reads this, not APP_DATA_PATH.
+				setenv( "VALVE_GAME_PATH", app->activity->internalDataPath, 1 );
+				SetAppLibPathEnv( app );
+				pthread_create( &g_engineThread, NULL, EngineThreadEntry, NULL );
+			}
 			break;
 
 		case APP_CMD_DESTROY:
