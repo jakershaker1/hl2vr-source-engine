@@ -209,4 +209,14 @@ IVoiceRecord* CreateVoiceRecord_OpenAL(int sampleRate)
 }
 #endif
 
+#else
+
+// No OpenAL available for this target (e.g. Android until openal-soft is
+// wired into the build) - voice recording is simply unavailable.
+class IVoiceRecord;
+IVoiceRecord* CreateVoiceRecord_OpenAL(int sampleRate)
+{
+	return nullptr;
+}
+
 #endif

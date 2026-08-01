@@ -20,15 +20,16 @@ import os
 import sys
 
 ANDROID_NDK_ENVVARS = ['ANDROID_NDK_HOME', 'ANDROID_NDK']
-ANDROID_NDK_SUPPORTED = [10, 19, 20]
+ANDROID_NDK_SUPPORTED = [10, 19, 20, 27]
 ANDROID_NDK_HARDFP_MAX = 11 # latest version that supports hardfp
 ANDROID_NDK_GCC_MAX = 17 # latest NDK that ships with GCC
 ANDROID_NDK_UNIFIED_SYSROOT_MIN = 15
 ANDROID_NDK_SYSROOT_FLAG_MAX = 19 # latest NDK that need --sysroot flag
-ANDROID_NDK_API_MIN = { 10: 3, 19: 16, 20: 16 } # minimal API level ndk revision supports
+ANDROID_NDK_GNUSTL_MAX = 20 # last NDK revision that still ships sources/cxx-stl/gnu-libstdc++; removed in r23+, use libc++ instead
+ANDROID_NDK_API_MIN = { 10: 3, 19: 16, 20: 16, 27: 21 } # minimal API level ndk revision supports
 ANDROID_64BIT_API_MIN = 21 # minimal API level that supports 64-bit targets
 
-# This class does support ONLY r10e and r19c/r20 NDK
+# This class does support r10e, r19c/r20, and r27 (libc++-only unified toolchain) NDKs
 class Android:
 	ctx            = None # waf context
 	arch           = None
@@ -85,9 +86,16 @@ class Android:
 			self.api = ANDROID_NDK_API_MIN[self.ndk_rev]
 			Logs.warn('API level automatically was set to %d due to NDK support' % self.api)
 
-		if self.is_arm64() or self.is_amd64() and self.api < ANDROID_64BIT_API_MIN:
+		if (self.is_arm64() or self.is_amd64()) and self.api < ANDROID_64BIT_API_MIN:
 			self.api = ANDROID_64BIT_API_MIN
 			Logs.warn('API level for 64-bit target automatically was set to %d' % self.api)
+
+	def uses_gnustl(self):
+		'''
+		Checks whether this NDK still ships the legacy gnu-libstdc++ sources
+		(removed in NDK r23+, which ships Clang's libc++ exclusively)
+		'''
+		return self.ndk_rev <= ANDROID_NDK_GNUSTL_MAX
 
 	def is_host(self):
 		'''
@@ -196,23 +204,52 @@ class Android:
 	def gen_binutils_path(self):
 		return os.path.join(self.gen_gcc_toolchain_path(), self.ndk_triplet(), 'bin')
 
+	def exe_suffix(self):
+		# on Windows the per-target clang/clang++ are .cmd wrapper scripts,
+		# not natively executable by subprocess without a shell
+		return '.cmd' if sys.platform.startswith('win32') else ''
+
 	def cc(self):
 		if self.is_host():
 			return 'clang --target=%s%d' % (self.ndk_triplet(), self.api)
-		return self.gen_toolchain_path() + ('clang' if self.is_clang() else 'gcc')
+		return self.gen_toolchain_path() + ('clang' if self.is_clang() else 'gcc') + self.exe_suffix()
 
 	def cxx(self):
 		if self.is_host():
 			return 'clang++ --target=%s%d' % (self.ndk_triplet(), self.api)
-		return self.gen_toolchain_path() + ('clang++' if self.is_clang() else 'g++')
+		return self.gen_toolchain_path() + ('clang++' if self.is_clang() else 'g++') + self.exe_suffix()
 
 	def strip(self):
 		if self.is_host():
 			return 'llvm-strip'
+		if self.is_clang():
+			# modern unified toolchain: llvm-strip lives next to clang, not in the legacy binutils folder
+			suffix = '.exe' if sys.platform.startswith('win32') else ''
+			return os.path.join(self.gen_gcc_toolchain_path(), 'bin', 'llvm-strip' + suffix)
 		return os.path.join(self.gen_binutils_path(), 'strip')
+
+	def ar(self):
+		if self.is_host():
+			return 'llvm-ar'
+		if self.is_clang():
+			suffix = '.exe' if sys.platform.startswith('win32') else ''
+			return os.path.join(self.gen_gcc_toolchain_path(), 'bin', 'llvm-ar' + suffix)
+		return os.path.join(self.gen_binutils_path(), 'ar')
+
+	def objcopy(self):
+		if self.is_host():
+			return 'llvm-objcopy'
+		if self.is_clang():
+			suffix = '.exe' if sys.platform.startswith('win32') else ''
+			return os.path.join(self.gen_gcc_toolchain_path(), 'bin', 'llvm-objcopy' + suffix)
+		return os.path.join(self.gen_binutils_path(), 'objcopy')
 
 	def system_stl(self):
 		# TODO: proper STL support
+		if not self.uses_gnustl():
+			# modern NDKs bundle libc++ headers under the unified sysroot and
+			# the clang++ triple wrapper finds them automatically
+			return []
 		return [
 			#os.path.abspath(os.path.join(self.ndk_home, 'sources', 'cxx-stl', 'system', 'include')),
 			os.path.abspath(os.path.join(self.ndk_home, 'sources', 'android', 'support', 'include'))
@@ -303,7 +340,7 @@ class Android:
 			ldflags += ['-lgcc']
 
 		if self.is_clang() or self.is_host():
-			ldflags += ['-stdlib=libstdc++']
+			ldflags += ['-stdlib=libstdc++'] if self.uses_gnustl() else ['-stdlib=libc++']
 		if self.is_arm():
 			if self.arch == 'armeabi-v7a':
 				ldflags += ['-march=armv7-a']
@@ -341,16 +378,23 @@ def configure(conf):
 		conf.environ['CC'] = android.cc()
 		conf.environ['CXX'] = android.cxx()
 		conf.environ['STRIP'] = android.strip()
+		conf.environ['AR'] = android.ar()
+		conf.environ['OBJCOPY'] = android.objcopy()
 		conf.env.CFLAGS += android.cflags()
 		conf.env.CXXFLAGS += android.cflags(True)
 		conf.env.LINKFLAGS += android.linkflags()
 		conf.env.LDFLAGS += android.ldflags()
-		conf.env.INCLUDES += [
-			os.path.abspath(os.path.join(android.ndk_home, 'sources', 'cxx-stl', 'gnu-libstdc++', '4.9', 'include')),
-			os.path.abspath(os.path.join(android.ndk_home, 'sources', 'cxx-stl', 'gnu-libstdc++', '4.9', 'libs', stlarch, 'include'))
-		]
-		conf.env.STLIBPATH += [os.path.abspath(os.path.join(android.ndk_home, 'sources','cxx-stl','gnu-libstdc++','4.9','libs',stlarch))]
-		conf.env.LDFLAGS += ['-lgnustl_static']
+		if android.uses_gnustl():
+			conf.env.INCLUDES += [
+				os.path.abspath(os.path.join(android.ndk_home, 'sources', 'cxx-stl', 'gnu-libstdc++', '4.9', 'include')),
+				os.path.abspath(os.path.join(android.ndk_home, 'sources', 'cxx-stl', 'gnu-libstdc++', '4.9', 'libs', stlarch, 'include'))
+			]
+			conf.env.STLIBPATH += [os.path.abspath(os.path.join(android.ndk_home, 'sources','cxx-stl','gnu-libstdc++','4.9','libs',stlarch))]
+			conf.env.LDFLAGS += ['-lgnustl_static']
+		else:
+			# modern NDK: clang++ triple wrapper defaults to libc++_static/libc++_shared
+			# automatically via the unified sysroot, nothing extra to add here
+			conf.env.LDFLAGS += ['-static-libstdc++']
 
 		conf.env.HAVE_M = True
 		if android.is_hardfp():

@@ -65,7 +65,7 @@ DEFINE_ENUM_BITWISE_OPERATORS( EPlatform_t );
 #endif
 
 
-#if defined( OSX ) || defined( LINUX ) || defined(PLATFORM_BSD)
+#if defined( OSX ) || ( defined( LINUX ) && !defined( ANDROID ) ) || defined(PLATFORM_BSD)
 ILauncherMgr *g_pLauncherMgr = NULL;
 #endif
 
@@ -1382,6 +1382,11 @@ bool CVideoCommonServices::ProcessFullScreenInput( bool &bAbortEvent, bool &bPau
 	bool bEscPressed    = ( m_bScanEsc )    ? CGEventSourceKeyState( kCGEventSourceStateCombinedSessionState, kVK_Escape ) : false;
 	bool bReturnPressed = ( m_bScanReturn ) ? CGEventSourceKeyState( kCGEventSourceStateCombinedSessionState, kVK_Return ) : false;
 	bool bSpacePressed  = ( m_bScanSpace )  ? CGEventSourceKeyState( kCGEventSourceStateCombinedSessionState, kVK_Space )  : false;
+#elif defined(ANDROID)
+	// No keyboard on Android/VR - videos always play to completion for now.
+	bool bEscPressed	= false;
+	bool bReturnPressed	= false;
+	bool bSpacePressed	= false;
 #elif defined(LINUX) || defined(PLATFORM_BSD)
 	g_pLauncherMgr->PumpWindowsMessageLoop();
 

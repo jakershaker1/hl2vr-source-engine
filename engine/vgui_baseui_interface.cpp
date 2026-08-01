@@ -1635,6 +1635,10 @@ void CEngineVGui::Simulate()
 		g_pLauncherMgr->RenderedSize( width, height, false );	// false = get
 		w = width;
 		h = height;
+#elif defined( ANDROID )
+		// no minimizable window concept on Android/VR, always use the mode dimensions
+		w = videomode->GetModeWidth();
+		h = videomode->GetModeHeight();
 #else
 		if ( ::IsIconic( *pmainwindow ) )
 		{

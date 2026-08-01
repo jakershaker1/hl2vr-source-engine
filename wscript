@@ -463,6 +463,11 @@ def configure(conf):
 		projects['game'] += ['togles']
 	elif conf.env.GL:
 		projects['game'] += ['togl']
+	elif conf.env.DEST_OS != 'win32' and 'materialsystem/shaderapidx9' in projects['game']:
+		# No D3D9/togl(es) renderer backend selected - shaderapidx9 is D3D9-only
+		# and won't compile. Use the no-op stub until a real backend (Vulkan) exists.
+		projects['game'].remove('materialsystem/shaderapidx9')
+		projects['game'].append('materialsystem/shaderapiempty')
 
 	if conf.env.DEST_OS == 'win32':
 		projects['game'] += ['utils/bzip2']
@@ -648,5 +653,8 @@ def build(bld):
 			projects['game'] += ['togles']
 		elif bld.env.GL:
 			projects['game'] += ['togl']
+		elif bld.env.DEST_OS != 'win32' and 'materialsystem/shaderapidx9' in projects['game']:
+			projects['game'].remove('materialsystem/shaderapidx9')
+			projects['game'].append('materialsystem/shaderapiempty')
 
 		bld.add_subproject(projects['game'])

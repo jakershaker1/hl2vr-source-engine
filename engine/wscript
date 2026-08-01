@@ -308,7 +308,7 @@ def build(bld):
 			'audio/snd_wave_source.cpp',
 			'audio/snd_wave_temp.cpp',
 			'audio/snd_win.cpp',
-			'audio/voice_gain.cpp',	
+			'audio/voice_gain.cpp',
 			'audio/snd_mp3_source.cpp',
 			'audio/snd_wave_mixer_mp3.cpp',
 			'audio/VBRHeader.cpp', #[!$X360]

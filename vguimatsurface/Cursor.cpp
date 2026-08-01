@@ -394,6 +394,8 @@ void CursorSelect(HCursor hCursor)
 
 	ActivateCurrentCursor();
 
+#elif defined( ANDROID )
+	// No hardware cursor on Android/VR.
 #else
 #error
 #endif
@@ -415,6 +417,8 @@ void HideHardwareCursor()
 		g_pLauncherMgr->SetMouseCursor( s_hCurrentlySetCursor );
 		g_pLauncherMgr->SetMouseVisible( false );
 	}
+#elif defined( ANDROID )
+	// No hardware cursor on Android/VR.
 #else
 #error
 #endif
@@ -443,6 +447,8 @@ void ActivateCurrentCursor()
 			g_pLauncherMgr->SetMouseCursor( s_hCurrentlySetCursor );
 			g_pLauncherMgr->SetMouseVisible( true );
 		}
+#elif defined( ANDROID )
+	// No hardware cursor on Android/VR.
 #else
 #error
 #endif
@@ -517,6 +523,15 @@ void CursorGetPos(void *hwnd, int &x, int &y)
 		x = rx + width/2;
 		y = ry + height/2;
 		//printf( "Mouse(inv) x:%d y:%d %d %d\n", x, y, width, height );
+	}
+#elif defined( ANDROID )
+	// No hardware cursor on Android/VR - report the middle of the viewport.
+	{
+		CMatRenderContextPtr pRenderContext( g_pMaterialSystem );
+		int rx, ry, width, height;
+		pRenderContext->GetViewport( rx, ry, width, height );
+		x = rx + width/2;
+		y = ry + height/2;
 	}
 #else
 	POINT pt;

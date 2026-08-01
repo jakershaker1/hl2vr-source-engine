@@ -135,7 +135,7 @@ void CInput::ActivateMouse (void)
 		m_fMouseActive = true;
 
 		ResetMouse();
-#if !defined( PLATFORM_WINDOWS )
+#if defined( USE_SDL )
 		int dx, dy;
 		engine->GetMouseDelta( dx, dy, true );
 #endif
@@ -601,6 +601,8 @@ void CInput::AccumulateMouse( void )
 		engine->GetMouseDelta( dx, dy );
 		m_flAccumulatedMouseXMovement += dx;
 		m_flAccumulatedMouseYMovement += dy;
+#elif defined( ANDROID )
+		// No mouse on Android/VR - camera is driven by head tracking / controllers instead.
 #else
 #error
 #endif

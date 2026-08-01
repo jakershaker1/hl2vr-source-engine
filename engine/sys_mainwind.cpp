@@ -207,6 +207,10 @@ private:
 
 		RECT			m_rcLastRestoredClientRect;
 	#endif
+#elif defined( ANDROID )
+	// ANativeWindow*, set once the Android app scaffolding hands us the native
+	// window surface. Opaque void* to match HWND's POSIX typedef.
+	void			*m_hWindow;
 #endif
 
 #if defined( USE_SDL )
@@ -1077,6 +1081,12 @@ bool CGame::CreateGameWindow( void )
 
 	AttachToWindow( );
 	return true;
+#elif defined( ANDROID )
+	// The native window surface is owned by the Android NativeActivity / OpenXR
+	// session, not created here. Wired up in the Android app scaffolding.
+	modinfo->deleteThis();
+	modinfo = NULL;
+	return true;
 #else
 #error
 #endif
@@ -1090,6 +1100,10 @@ void CGame::DestroyGameWindow()
 {
 #if defined( USE_SDL )
 	g_pLauncherMgr->DestroyGameWindow();
+#elif defined( ANDROID )
+	DetachFromWindow();
+	m_hWindow = NULL;
+	m_bExternallySuppliedWindow = false;
 #else
 #ifndef DEDICATED
 	// Destroy all things created when the window was created
@@ -1151,7 +1165,7 @@ void CGame::AttachToWindow()
 	if ( g_pInputSystem )
 	{
 		// Attach the input system window proc
-#if defined( WIN32 )
+#if defined( WIN32 ) || defined( ANDROID )
 		g_pInputSystem->AttachToWindow( (void *)m_hWindow );
 #else
 		g_pInputSystem->AttachToWindow( (void *)m_pSDLWindow );
@@ -1163,7 +1177,7 @@ void CGame::AttachToWindow()
 	if ( g_pMatSystemSurface )
 	{
 		// Attach the vgui matsurface window proc
-#if defined( WIN32 )
+#if defined( WIN32 ) || defined( ANDROID )
 		g_pMatSystemSurface->AttachToWindow( (void *)m_hWindow, true );
 #else
 		g_pMatSystemSurface->AttachToWindow( (void *)m_pSDLWindow, true );
@@ -1227,6 +1241,8 @@ bool CGame::InputAttachToGameWindow()
 #elif defined( USE_SDL )
 	Assert( !"Impl me" );
 	return false;
+#elif defined( ANDROID )
+	// No mouse capture concept on Android/VR.
 #else
 #error
 #endif
@@ -1247,6 +1263,8 @@ void CGame::InputDetachFromGameWindow()
 	ReleaseCapture();
 #elif defined( USE_SDL )
 	Assert( !"Impl me" );
+#elif defined( ANDROID )
+	// No mouse capture concept on Android/VR.
 #else
     #error "have no idea what OS we are building for"
 #endif
@@ -1323,7 +1341,7 @@ void CGame::PlayStartupVideos( void )
 	::ShowCursor( FALSE );
   #endif
 
-#if defined( LINUX )
+#if defined( LINUX ) && !defined( ANDROID )
 	extern void VAudioInit();
 	VAudioInit();
 	Audio_CreateSDLAudioDevice();
@@ -1443,6 +1461,8 @@ CGame::CGame()
 #endif
 
 	m_hWindow = 0;
+#elif defined( ANDROID )
+	m_hWindow = NULL;
 #endif
 
 	m_x = m_y = 0;
@@ -1557,7 +1577,7 @@ void *CGame::GetMainDeviceWindow( void )
 
 void *CGame::GetMainWindowPlatformSpecificHandle( void )
 {
-#ifdef WIN32
+#if defined( WIN32 ) || defined( ANDROID )
 	return (void*)m_hWindow;
 #else
 	SDL_SysWMinfo pInfo;
@@ -1593,7 +1613,13 @@ void** CGame::GetMainWindowAddress( void )
 
 void CGame::GetDesktopInfo( int &width, int &height, int &refreshrate )
 {
-#if defined( USE_SDL )
+#if defined( ANDROID )
+	// Placeholder until the real per-eye recommended resolution/refresh rate is
+	// queried from the OpenXR runtime (xrGetViewConfigurationViews) in task #5.
+	width = 1920;
+	height = 1080;
+	refreshrate = 90;
+#elif defined( USE_SDL )
 
 	width = 640;
 	height = 480;
@@ -1645,6 +1671,12 @@ void CGame::UpdateDesktopInformation( )
 	m_iDesktopWidth = mode.w;
 	m_iDesktopHeight = mode.h;
 	m_iDesktopRefreshRate = mode.refresh_rate;
+#elif defined( ANDROID )
+	// Placeholder until the real per-eye recommended resolution/refresh rate is
+	// queried from the OpenXR runtime (xrGetViewConfigurationViews) in task #5.
+	m_iDesktopWidth = 1920;
+	m_iDesktopHeight = 1080;
+	m_iDesktopRefreshRate = 90;
 #else
 	HDC dc = ::GetDC( m_hWindow );
 	m_iDesktopWidth = ::GetDeviceCaps(dc, HORZRES);

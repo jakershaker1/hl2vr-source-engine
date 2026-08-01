@@ -1401,6 +1401,8 @@ void CEngineAPI::PumpMessagesEditMode( bool &bIdle, long &lIdleCount )
 	}
 #elif defined( USE_SDL )
 	Error( "Not supported" );
+#elif defined( ANDROID )
+	// Hammer edit-mode message pump is a Windows-only tool feature; never reached on Android.
 #else
 #error
 #endif

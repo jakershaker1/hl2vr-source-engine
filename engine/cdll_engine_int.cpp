@@ -2050,7 +2050,7 @@ void ClientDLL_VoiceStatus( int entindex, bool bTalking )
 //-----------------------------------------------------------------------------
 void CEngineClient::FlashWindow()
 {
-#ifndef USE_SDL
+#if !defined( USE_SDL ) && defined( IS_WINDOWS_PC )
 	FLASHWINFO flashwinfo;
 	flashwinfo.cbSize = sizeof( flashwinfo );
 	flashwinfo.hwnd = (HWND)game->GetMainWindow();

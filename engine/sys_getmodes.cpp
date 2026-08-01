@@ -1046,7 +1046,7 @@ void CVideoMode_Common::InvalidateWindow()
 		fake.window.windowID = SDL_GetWindowID( (SDL_Window *) g_pLauncherMgr->GetWindowRef() );
 		fake.window.event = SDL_WINDOWEVENT_EXPOSED;
 		SDL_PushEvent(&fake);
-#else
+#elif !defined( ANDROID )
 		InvalidateRect( (HWND)game->GetMainWindow(), NULL, FALSE );
 #endif
     }
@@ -1160,7 +1160,6 @@ typedef struct tagRGBQUAD {
 #define BI_RLE4       2L
 #define BI_BITFIELDS  3L
 
-#if 0
 typedef struct _GUID
 {
     unsigned long Data1;
@@ -1169,7 +1168,6 @@ typedef struct _GUID
     unsigned char Data4[8];
 } GUID;
 
-#endif
 typedef GUID UUID;
 
 #endif //WIN32
@@ -1369,6 +1367,11 @@ void CVideoMode_Common::AdjustWindow( int nWidth, int nHeight, int nBPP, bool bW
 	// Use Change Display Settings to go full screen
 	ChangeDisplaySettingsToFullscreen( nWidth, nHeight, nBPP );
 
+#if defined( ANDROID )
+	// No native OS window to resize/reposition/border on Android - the app always
+	// owns the full VR compositor surface.
+	CenterEngineWindow( game->GetMainWindow(), nWidth, nHeight );
+#else
 	RECT WindowRect;
 	WindowRect.top      = 0;
 	WindowRect.left     = 0;
@@ -1459,9 +1462,10 @@ void CVideoMode_Common::AdjustWindow( int nWidth, int nHeight, int nBPP, bool bW
 			SDL_SetWindowBordered( win, SDL_FALSE );
 		else
 			SDL_SetWindowBordered( win, SDL_TRUE );
-			
+
 	}
 #endif
+#endif // ANDROID
 
 	game->SetWindowSize( nWidth, nHeight );
 
@@ -1548,7 +1552,12 @@ void CVideoMode_Common::CenterEngineWindow( void *hWndCenter, int width, int hei
 {
     int     CenterX, CenterY;
 
-#if defined(USE_SDL)
+#if defined(ANDROID)
+	// No native OS window to center on Android.
+	CenterX = 0;
+	CenterY = 0;
+	game->SetWindowXY( CenterX, CenterY );
+#elif defined(USE_SDL)
 	// Get the displayindex, and center our window on that display.
 	static ConVarRef sdl_displayindex( "sdl_displayindex" );
 	int displayindex = sdl_displayindex.IsValid() ? sdl_displayindex.GetInt() : 0;
@@ -2546,7 +2555,7 @@ void CVideoMode_MaterialSystem::RestoreVideo( void )
 
 #if defined( USE_SDL )
 	SDL_ShowWindow( (SDL_Window*)game->GetMainWindow() );
-#else
+#elif !defined( ANDROID )
 	ShowWindow( (HWND)game->GetMainWindow(), SW_SHOWNORMAL );
 #endif
     AdjustWindow( GetModeWidth(), GetModeHeight(), GetModeBPP(), IsWindowedMode() );
@@ -2564,7 +2573,7 @@ void CVideoMode_MaterialSystem::ReleaseFullScreen( void )
     if ( IsWindowedMode() )
         return;
 
-#if !defined( USE_SDL )
+#if !defined( USE_SDL ) && !defined( ANDROID )
     // Hide the main window
 	if ( m_nLastCDSWidth != 0 )
 		ChangeDisplaySettings( NULL, 0 );

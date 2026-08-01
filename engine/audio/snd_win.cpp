@@ -128,6 +128,9 @@ IAudioDevice *IAudioDevice::AutoDetectInit( bool waveOnly )
 		}
 #endif // NEVER
 
+#elif defined( ANDROID )
+		// No Android audio backend wired up yet (needs AAudio/OpenSL ES or a
+		// built openal-soft) - fall through to the null device below.
 #else
 #error
 #endif

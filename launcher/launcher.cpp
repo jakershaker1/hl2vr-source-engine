@@ -206,7 +206,7 @@ class CVCRHelpers : public IVCRHelpers
 public:
 	virtual void ErrorMessage( const char *pMsg )
 	{
-#if defined( WIN32 ) || defined( LINUX ) || defined(PLATFORM_BSD)
+#if ( defined( WIN32 ) || defined( LINUX ) || defined(PLATFORM_BSD) ) && !defined( ANDROID )
 		NOVCR( ::MessageBox( NULL, pMsg, "VCR Error", MB_OK ) );
 #endif
 	}
@@ -1445,6 +1445,15 @@ DLL_EXPORT int LauncherMain( int argc, char **argv )
 			if (!g_MultiRun) {
 				return retval;
 			}
+		}
+	}
+#elif defined( ANDROID )
+	else
+	{
+		if ( !GrabSourceMutex() && !g_MultiRun )
+		{
+			Error( "Only one instance of the game can be running at one time." );
+			return -1;
 		}
 	}
 #elif defined( POSIX )
