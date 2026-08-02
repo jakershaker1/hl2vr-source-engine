@@ -105,8 +105,17 @@ namespace
 			{
 				g_bEngineStarted = true;
 				setenv( "APP_DATA_PATH", app->activity->internalDataPath, 1 );
+
 				// GetBaseDirectory() (launcher.cpp) reads this, not APP_DATA_PATH.
-				setenv( "VALVE_GAME_PATH", app->activity->internalDataPath, 1 );
+				// Game content (hl2/, platform/) is pushed under the app's own
+				// external files dir - raw POSIX file I/O (which the engine's
+				// filesystem code uses) can't reach arbitrary /sdcard paths under
+				// scoped storage, only this app-specific one.
+				char gamePath[1024];
+				snprintf( gamePath, sizeof( gamePath ), "%s/hl2vr_content", app->activity->externalDataPath );
+				setenv( "VALVE_GAME_PATH", gamePath, 1 );
+				__android_log_print( ANDROID_LOG_INFO, "hl2vr", "VALVE_GAME_PATH=%s", gamePath );
+
 				SetAppLibPathEnv( app );
 				pthread_create( &g_engineThread, NULL, EngineThreadEntry, NULL );
 			}

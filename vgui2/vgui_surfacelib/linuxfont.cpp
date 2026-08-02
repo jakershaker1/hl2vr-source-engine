@@ -422,8 +422,7 @@ char *TryFindFont(const char *winFontName, bool bBold, int italic)
 
 	if( strcmp( winFontName, "Courier New") == 0 )
 	{
-		fontName = "LiberationMono-Regular.ttf";
-		snprintf( fontFile, sizeof fontFile, "%s/files/%s", getenv("APP_DATA_PATH"), fontName);
+		snprintf( fontFile, sizeof fontFile, "%s/platform/resource/linux_fonts/liberationmono-regular.ttf", getenv("VALVE_GAME_PATH") );
 		return fontFile;
 	}
 
@@ -457,9 +456,9 @@ char *TryFindFont(const char *winFontName, bool bBold, int italic)
 		fontNamePost = "oblique";
 
 	if( fontNamePost )
-		snprintf(fontFile, sizeof fontFile, "%s/files/%s-%s.ttf", getenv("APP_DATA_PATH"), fontName, fontNamePost);
+		snprintf(fontFile, sizeof fontFile, "%s/platform/resource/linux_fonts/%s-%s.ttf", getenv("VALVE_GAME_PATH"), fontName, fontNamePost);
 	else
-		snprintf(fontFile, sizeof fontFile, "%s/files/%s.ttf", getenv("APP_DATA_PATH"), fontName);
+		snprintf(fontFile, sizeof fontFile, "%s/platform/resource/linux_fonts/%s.ttf", getenv("VALVE_GAME_PATH"), fontName);
 
 
 	return fontFile;
