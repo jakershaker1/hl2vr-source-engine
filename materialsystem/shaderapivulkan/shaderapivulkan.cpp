@@ -17,6 +17,12 @@
 #include "materialsystem/idebugtextureinfo.h"
 #include "materialsystem/deformations.h"
 
+#if defined( ANDROID )
+#include <inttypes.h>
+#include <stdlib.h>
+#include "vr_xr_vulkan.h"
+#endif
+
 
 //-----------------------------------------------------------------------------
 // The empty mesh
@@ -285,7 +291,37 @@ public:
 	virtual void GetBackBufferDimensions( int& width, int& height ) const;
 	virtual int  StencilBufferBits() const { return 0; }
 	virtual bool IsAAEnabled() const { return false; }
-	virtual void Present( ) {}
+	virtual void Present( )
+	{
+#if defined( ANDROID )
+		// SetMode()/its CreateInterfaceFn indirection is never actually
+		// called in this build's real init flow - materialsystem fetches
+		// IShaderDevice straight from the EXPOSE_SINGLE_INTERFACE_GLOBALVAR
+		// registration below. Present() is confirmed-called every frame
+		// (verified on device), so that's where the VR session actually
+		// gets created, lazily, on first use.
+		static bool s_bTriedVrInit = false;
+		if ( !s_bTriedVrInit )
+		{
+			s_bTriedVrInit = true;
+
+			const char *pInstanceHex = getenv( "HL2VR_XR_INSTANCE" );
+			const char *pSystemIdHex = getenv( "HL2VR_XR_SYSTEM_ID" );
+			if ( pInstanceHex && pSystemIdHex )
+			{
+				XrInstance instance = (XrInstance)(uintptr_t)strtoull( pInstanceHex, NULL, 16 );
+				XrSystemId systemId = (XrSystemId)strtoull( pSystemIdHex, NULL, 16 );
+				VRXR_Init( instance, systemId );
+			}
+			else
+			{
+				Warning( "shaderapivulkan: HL2VR_XR_INSTANCE/HL2VR_XR_SYSTEM_ID not set - no VR session\n" );
+			}
+		}
+
+		VRXR_PresentFrame();
+#endif
+	}
 	virtual void GetWindowSize( int &width, int &height ) const;
 	virtual bool AddView( void* hwnd );
 	virtual void RemoveView( void* hwnd );
@@ -1341,7 +1377,12 @@ bool CShaderDeviceMgrEmpty::SetAdapter( int nAdapter, int nFlags )
 }
 
 // FIXME: Is this a public interface? Might only need to be private to shaderapi
-CreateInterfaceFn CShaderDeviceMgrEmpty::SetMode( void *hWnd, int nAdapter, const ShaderDeviceInfo_t& mode ) 
+// Note: not actually reached in this build's real init flow - materialsystem
+// fetches IShaderDevice straight from the EXPOSE_SINGLE_INTERFACE_GLOBALVAR
+// registration instead of through this CreateInterfaceFn indirection.
+// VR session creation lives in CShaderDeviceEmpty::Present() instead, since
+// that's confirmed-called every frame.
+CreateInterfaceFn CShaderDeviceMgrEmpty::SetMode( void *hWnd, int nAdapter, const ShaderDeviceInfo_t& mode )
 {
 	return ShaderInterfaceFactory;
 }

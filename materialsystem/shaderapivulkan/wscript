@@ -17,6 +17,9 @@ def configure(conf):
 		'PROTECTED_THINGS_ENABLE'
 	])
 
+	if conf.env.DEST_OS == 'android':
+		conf.check(lib='openxr_loader', uselib_store='OPENXR')
+
 def build(bld):
 	source = [
 		'shaderapivulkan.cpp',
@@ -38,7 +41,8 @@ def build(bld):
 	linkflags = []
 
 	if bld.env.DEST_OS == 'android':
-		includes += ['../../openxr_sdk/include']
+		source += ['../../launcher/android/vr_xr_vulkan.cpp']
+		includes += ['../../openxr_sdk/include', '../../launcher/android']
 		libs += ['OPENXR']
 		linkflags += ['-lvulkan']
 

@@ -1,17 +1,20 @@
 //========= Copyright Valve Corporation, All rights reserved. ============//
 //
-// Minimal OpenXR + Vulkan presentation loop. See vr_session.h.
+// Reusable OpenXR + Vulkan device/session/swapchain plumbing. See
+// vr_xr_vulkan.h. Logic originally proven out in a standalone bootstrap
+// (clears each eye to an animated color) before being wired up as the
+// real per-frame present path for materialsystem/shaderapivulkan.
 //
 //===========================================================================//
 
-#include "vr_session.h"
+#include "vr_xr_vulkan.h"
 
 #include <android/log.h>
-#include <android_native_app_glue.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #define LOG_TAG "hl2vr.vr"
@@ -62,6 +65,7 @@ namespace
 		XrSessionState sessionState = XR_SESSION_STATE_UNKNOWN;
 		bool sessionRunning = false;
 		bool exitRequested = false;
+		bool ready = false;
 
 		VkInstance vkInstance = VK_NULL_HANDLE;
 		VkPhysicalDevice vkPhysicalDevice = VK_NULL_HANDLE;
@@ -82,6 +86,8 @@ namespace
 		};
 		std::vector<Eye> eyes;
 	};
+
+	VRState g_Vr;
 
 	bool CreateVulkanInstanceForXR( VRState &vr )
 	{
@@ -283,7 +289,9 @@ namespace
 
 	// Records and submits a command buffer that clears the given swapchain
 	// image to a color, leaving it in COLOR_ATTACHMENT_OPTIMAL layout for
-	// the compositor. No render pass/pipeline needed for a plain clear.
+	// the compositor. No render pass/pipeline needed for a plain clear -
+	// real draw submission replaces this once shaderapivulkan does more
+	// than satisfy the interface.
 	void RenderEyeClear( VRState &vr, VkImage image, VkCommandBuffer cmd, float r, float g, float b )
 	{
 		VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -438,42 +446,73 @@ namespace
 	}
 }
 
-void RunVRSession( struct android_app *app, XrInstance instance, XrSystemId systemId )
+bool VRXR_Init( XrInstance instance, XrSystemId systemId )
 {
-	VRState vr;
-	vr.instance = instance;
-	vr.systemId = systemId;
+	g_Vr.instance = instance;
+	g_Vr.systemId = systemId;
 
-	bool ok = CreateVulkanInstanceForXR( vr )
-		&& CreateVulkanDeviceForXR( vr )
-		&& CreateXrSession( vr )
-		&& CreateSwapchains( vr );
+	g_Vr.ready = CreateVulkanInstanceForXR( g_Vr )
+		&& CreateVulkanDeviceForXR( g_Vr )
+		&& CreateXrSession( g_Vr )
+		&& CreateSwapchains( g_Vr );
 
-	if ( !ok )
+	if ( !g_Vr.ready )
+		LOGE( "VR session setup failed" );
+	else
+		LOGI( "VR session ready: %zu eye(s), %ux%u", g_Vr.eyes.size(), g_Vr.eyes.empty() ? 0 : g_Vr.eyes[0].width, g_Vr.eyes.empty() ? 0 : g_Vr.eyes[0].height );
+
+	return g_Vr.ready;
+}
+
+void VRXR_PresentFrame()
+{
+	if ( !g_Vr.ready )
+		return;
+
+	PollXrEvents( g_Vr );
+	if ( g_Vr.sessionRunning )
 	{
-		LOGE( "VR session setup failed - aborting VR render loop" );
+		RenderFrame( g_Vr );
 	}
 	else
 	{
-		LOGI( "VR session ready: %zu eye(s), %ux%u", vr.eyes.size(), vr.eyes.empty() ? 0 : vr.eyes[0].width, vr.eyes.empty() ? 0 : vr.eyes[0].height );
-
-		while ( !vr.exitRequested && app->destroyRequested == 0 )
-		{
-			PollXrEvents( vr );
-			if ( vr.sessionRunning )
-				RenderFrame( vr );
-		}
+		// The engine calls Present() every frame regardless of whether the XR
+		// session has reached the running state yet. Busy-spinning xrPollEvent
+		// hundreds of times a second while we wait starves the system
+		// compositor/window manager of the scheduling time it needs to
+		// actually advance the session state - yield instead.
+		usleep( 10000 );
 	}
+}
 
-	if ( vr.session != XR_NULL_HANDLE )
+bool VRXR_WantsExit()
+{
+	return g_Vr.exitRequested;
+}
+
+void VRXR_Shutdown()
+{
+	if ( g_Vr.session != XR_NULL_HANDLE )
 	{
-		if ( vr.sessionRunning )
-			xrEndSession( vr.session );
-		xrDestroySession( vr.session );
+		if ( g_Vr.sessionRunning )
+			xrEndSession( g_Vr.session );
+		xrDestroySession( g_Vr.session );
+		g_Vr.session = XR_NULL_HANDLE;
 	}
-	if ( vr.vkDevice != VK_NULL_HANDLE )
-		vkDestroyDevice( vr.vkDevice, NULL );
-	if ( vr.vkInstance != VK_NULL_HANDLE )
-		vkDestroyInstance( vr.vkInstance, NULL );
-	xrDestroyInstance( vr.instance );
+	if ( g_Vr.vkDevice != VK_NULL_HANDLE )
+	{
+		vkDestroyDevice( g_Vr.vkDevice, NULL );
+		g_Vr.vkDevice = VK_NULL_HANDLE;
+	}
+	if ( g_Vr.vkInstance != VK_NULL_HANDLE )
+	{
+		vkDestroyInstance( g_Vr.vkInstance, NULL );
+		g_Vr.vkInstance = VK_NULL_HANDLE;
+	}
+	if ( g_Vr.instance != XR_NULL_HANDLE )
+	{
+		xrDestroyInstance( g_Vr.instance );
+		g_Vr.instance = XR_NULL_HANDLE;
+	}
+	g_Vr.ready = false;
 }

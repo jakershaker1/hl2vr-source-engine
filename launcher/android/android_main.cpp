@@ -2,24 +2,26 @@
 //
 // NativeActivity entry point for the Android/VR port.
 //
-// Bridges Android's native_app_glue lifecycle into OpenXR + a minimal
-// Vulkan presentation loop (see openxr_bootstrap.*, vr_session.*). This
+// Bridges Android's native_app_glue lifecycle into OpenXR (see
+// openxr_bootstrap.*) and the real engine (LauncherMainAndroid). This
 // replaces the old SDL Java-Activity/JNI bridge (ValveActivity2) with a
 // plain android.app.NativeActivity, since VR runtimes (OpenXR) expect to
 // drive the native window/session lifecycle directly rather than through
 // an SDL-owned Activity.
 //
-// The VR session (openxr_bootstrap/vr_session) is a standalone
-// visual-validation path (clears each eye to an animated color) - it is
-// not yet wired into the engine's materialsystem/shaderapi (that's tracked
-// separately). The real engine entry point (LauncherMainAndroid) is also
-// started here, on its own thread, so we can see how far engine init gets
-// (e.g. locating HL2 game content) independent of the VR render path.
+// The XrInstance/XrSystemId created here are handed to the engine (which
+// runs in the same process, but a different .so - materialsystem's
+// shaderapivulkan module) via env vars, following this codebase's existing
+// convention for passing Android-specific state across module boundaries
+// (see APP_DATA_PATH/VALVE_GAME_PATH/APP_LIB_PATH below). shaderapivulkan
+// owns creating the actual Vulkan device/session/swapchains and driving
+// the per-frame present (see launcher/android/vr_xr_vulkan.*).
 //
 //===========================================================================//
 
 #include <android/log.h>
 #include <android_native_app_glue.h>
+#include <inttypes.h>
 #include <jni.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -27,31 +29,14 @@
 #include <unistd.h>
 
 #include "openxr_bootstrap.h"
-#include "vr_session.h"
 
 extern "C" int LauncherMainAndroid( int argc, char **argv ); // launcher/android/main.cpp
 
 namespace
 {
 	struct android_app *g_pAndroidApp;
-	pthread_t g_vrThread;
 	pthread_t g_engineThread;
-	bool g_bVrStarted;
 	bool g_bEngineStarted;
-
-	struct VrThreadArgs
-	{
-		XrInstance instance;
-		XrSystemId systemId;
-	};
-
-	void *VrThreadEntry( void *pArg )
-	{
-		VrThreadArgs *args = (VrThreadArgs *)pArg;
-		RunVRSession( g_pAndroidApp, args->instance, args->systemId );
-		delete args;
-		return NULL;
-	}
 
 	void *EngineThreadEntry( void * )
 	{
@@ -145,13 +130,20 @@ void android_main( struct android_app *app )
 	app->onAppCmd = HandleAppCmd;
 	app->onInputEvent = HandleInputEvent;
 
+	// Loader init / instance / system query only. shaderapivulkan (loaded
+	// later, by the engine, in a different .so) owns creating the actual
+	// Vulkan device/session/swapchains from this instance - hand it over via
+	// env vars, the same mechanism used for the other Android-specific state
+	// below.
 	XrInstance instance = XR_NULL_HANDLE;
 	XrSystemId systemId = XR_NULL_SYSTEM_ID;
 	if ( InitOpenXR( app, &instance, &systemId ) )
 	{
-		VrThreadArgs *args = new VrThreadArgs{ instance, systemId };
-		g_bVrStarted = true;
-		pthread_create( &g_vrThread, NULL, VrThreadEntry, args );
+		char buf[32];
+		snprintf( buf, sizeof( buf ), "%" PRIxPTR, (uintptr_t)instance );
+		setenv( "HL2VR_XR_INSTANCE", buf, 1 );
+		snprintf( buf, sizeof( buf ), "%" PRIx64, (uint64_t)systemId );
+		setenv( "HL2VR_XR_SYSTEM_ID", buf, 1 );
 	}
 
 	while ( true )
