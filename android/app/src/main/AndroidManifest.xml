@@ -12,6 +12,11 @@
     <!-- Needed to discover/bind the OpenXR runtime broker on OpenXR-conformant devices. -->
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+
+    <!-- Android XR (Samsung Galaxy XR / Moohan): without this the runtime
+         logs "Permission failure: android.permission.XR_TRACKING_IN_BACKGROUND"
+         and the XR session never leaves XR_SESSION_STATE_IDLE. -->
+    <uses-permission android:name="android.permission.XR_TRACKING_IN_BACKGROUND" />
     <queries>
         <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
         <intent>

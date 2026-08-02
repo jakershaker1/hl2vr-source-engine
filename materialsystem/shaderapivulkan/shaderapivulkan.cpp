@@ -17,10 +17,357 @@
 #include "materialsystem/idebugtextureinfo.h"
 #include "materialsystem/deformations.h"
 
+// tier0/basetypes.h #defines nullptr to 0 for musl-flavored Linux builds
+// (`!PLATFORM_GLIBC && LINUX`) - that condition is also true for Android,
+// even though NDK Clang has no need for the workaround. Left in place, it
+// silently corrupts every real nullptr later in this translation unit,
+// including inside libc++'s own std::vector template internals (manifests
+// as bogus "cannot initialize ... with an rvalue of type 'int'" errors deep
+// in vector's __compressed_pair machinery). Nothing above this point in
+// this file relies on the fake macro - it only ever uses NULL/VK_NULL_HANDLE
+// explicitly - so undoing it here is safe.
+#ifdef nullptr
+#undef nullptr
+#endif
+
 #if defined( ANDROID )
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <vector>
+#include "pixelwriter.h"
+#include <android/log.h>
 #include "vr_xr_vulkan.h"
+
+#define HL2VR_DIAG_TAG "hl2vr.smvk"
+#define HL2VR_DIAG( ... ) __android_log_print( ANDROID_LOG_INFO, HL2VR_DIAG_TAG, __VA_ARGS__ )
+
+//-----------------------------------------------------------------------------
+// Minimal CPU-side render state shared by CEmptyMesh/CShaderAPIEmpty: a
+// per-MaterialMatrixMode_t matrix stack (feeds the MVP pushed to
+// basic.vert) and a table of texture handles (currently just bookkeeping -
+// every draw samples a single fallback white texture; real per-material
+// texture upload is future work, see VRXR_CreateImage2D).
+//-----------------------------------------------------------------------------
+namespace
+{
+	// 16 floats, row-major ( m[row*4+col] ), column-vector convention
+	// ( v' = M * v ), matching public/mathlib/vmatrix.h's VMatrix layout -
+	// that's the convention the engine's LoadMatrix()/MultMatrix() calls
+	// assume. Transposed to GLSL's column-major layout only at the very end,
+	// when building the push constant in ComputeMvp().
+	typedef float Mat4[16];
+
+	void Mat4Identity( Mat4 m )
+	{
+		memset( m, 0, sizeof( Mat4 ) );
+		m[0] = m[5] = m[10] = m[15] = 1.0f;
+	}
+
+	void Mat4Mul( Mat4 out, const Mat4 a, const Mat4 b )
+	{
+		Mat4 tmp;
+		for ( int r = 0; r < 4; ++r )
+		{
+			for ( int c = 0; c < 4; ++c )
+			{
+				float sum = 0.0f;
+				for ( int k = 0; k < 4; ++k )
+					sum += a[r * 4 + k] * b[k * 4 + c];
+				tmp[r * 4 + c] = sum;
+			}
+		}
+		memcpy( out, tmp, sizeof( Mat4 ) );
+	}
+
+	void Mat4Transpose( float dst[16], const Mat4 src )
+	{
+		for ( int r = 0; r < 4; ++r )
+			for ( int c = 0; c < 4; ++c )
+				dst[c * 4 + r] = src[r * 4 + c];
+	}
+
+	struct MatrixStackState
+	{
+		Mat4 stack[24];
+		int depth;
+	};
+
+	MatrixStackState g_MatStacks[NUM_MATRIX_MODES];
+	MaterialMatrixMode_t g_CurMatMode = MATERIAL_MODEL;
+
+	bool g_MatStacksInit = false;
+	void EnsureMatStacksInit()
+	{
+		if ( g_MatStacksInit )
+			return;
+		g_MatStacksInit = true;
+		for ( int i = 0; i < NUM_MATRIX_MODES; ++i )
+		{
+			g_MatStacks[i].depth = 0;
+			Mat4Identity( g_MatStacks[i].stack[0] );
+		}
+	}
+
+	Mat4 &CurMat( MaterialMatrixMode_t mode )
+	{
+		EnsureMatStacksInit();
+		MatrixStackState &s = g_MatStacks[mode];
+		return s.stack[s.depth];
+	}
+
+	// Builds the final push-constant MVP (GLSL column-major) from the
+	// independent view/projection/model stacks' current tops.
+	void ComputeMvp( float dstColumnMajor[16] )
+	{
+		EnsureMatStacksInit();
+		Mat4 vp, mvp;
+		Mat4Mul( vp, g_MatStacks[MATERIAL_PROJECTION].stack[g_MatStacks[MATERIAL_PROJECTION].depth],
+			g_MatStacks[MATERIAL_VIEW].stack[g_MatStacks[MATERIAL_VIEW].depth] );
+		Mat4Mul( mvp, vp, g_MatStacks[MATERIAL_MODEL].stack[g_MatStacks[MATERIAL_MODEL].depth] );
+		Mat4Transpose( dstColumnMajor, mvp );
+	}
+
+	// One fallback texture (flat white) that every draw samples from for now.
+	// One-shot blocking upload of RGBA8 pixel data into an already-created
+	// VkImage (OPTIMAL tiling, SAMPLED|TRANSFER_DST usage) via a staging
+	// buffer. Shared by the fallback white texture and real per-material
+	// texture uploads (TexImage2D/TexUnlock).
+	bool UploadRgba8ToImage( VkImage image, uint32_t width, uint32_t height, const void *pRgba8Data )
+	{
+		VkDeviceSize size = (VkDeviceSize)width * height * 4;
+		VkBuffer stagingBuffer = VK_NULL_HANDLE;
+		VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+		if ( !VRXR_CreateBuffer( size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuffer, &stagingMemory ) )
+			return false;
+
+		void *pData = NULL;
+		vkMapMemory( VRXR_GetDevice(), stagingMemory, 0, size, 0, &pData );
+		memcpy( pData, pRgba8Data, (size_t)size );
+		vkUnmapMemory( VRXR_GetDevice(), stagingMemory );
+
+		VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+		allocInfo.commandPool = VRXR_GetCommandPool();
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandBufferCount = 1;
+		VkCommandBuffer cmd = VK_NULL_HANDLE;
+		vkAllocateCommandBuffers( VRXR_GetDevice(), &allocInfo, &cmd );
+
+		VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer( cmd, &beginInfo );
+
+		VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+		toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		toDst.image = image;
+		toDst.subresourceRange = range;
+		vkCmdPipelineBarrier( cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst );
+
+		VkBufferImageCopy copyRegion = {};
+		copyRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+		copyRegion.imageExtent = { width, height, 1 };
+		vkCmdCopyBufferToImage( cmd, stagingBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion );
+
+		VkImageMemoryBarrier toRead = toDst;
+		toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		vkCmdPipelineBarrier( cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead );
+
+		vkEndCommandBuffer( cmd );
+
+		VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &cmd;
+		vkQueueSubmit( VRXR_GetQueue(), 1, &submitInfo, VK_NULL_HANDLE );
+		vkQueueWaitIdle( VRXR_GetQueue() );
+
+		vkFreeCommandBuffers( VRXR_GetDevice(), VRXR_GetCommandPool(), 1, &cmd );
+		vkDestroyBuffer( VRXR_GetDevice(), stagingBuffer, NULL );
+		vkFreeMemory( VRXR_GetDevice(), stagingMemory, NULL );
+		return true;
+	}
+
+	VkImageView CreateImageViewRgba8( VkImage image )
+	{
+		VkImageViewCreateInfo viewInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		viewInfo.image = image;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		VkImageView view = VK_NULL_HANDLE;
+		vkCreateImageView( VRXR_GetDevice(), &viewInfo, NULL, &view );
+		return view;
+	}
+
+	VkImage g_WhiteImage = VK_NULL_HANDLE;
+	VkDeviceMemory g_WhiteImageMemory = VK_NULL_HANDLE;
+	VkImageView g_WhiteImageView = VK_NULL_HANDLE;
+
+	VkImageView EnsureWhiteTexture()
+	{
+		if ( g_WhiteImageView != VK_NULL_HANDLE )
+			return g_WhiteImageView;
+
+		if ( !VRXR_CreateImage2D( 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &g_WhiteImage, &g_WhiteImageMemory ) )
+			return VK_NULL_HANDLE;
+
+		unsigned char whitePixel[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+		if ( !UploadRgba8ToImage( g_WhiteImage, 1, 1, whitePixel ) )
+			return VK_NULL_HANDLE;
+
+		g_WhiteImageView = CreateImageViewRgba8( g_WhiteImage );
+		return g_WhiteImageView;
+	}
+
+	//-------------------------------------------------------------------------
+	// Real per-material texture upload. CreateTexture()/CreateTextures() just
+	// record width/height (Vulkan resources are created lazily on first
+	// upload, since these get called well before the device exists - see the
+	// EnsureGpuBuffers() comment on CEmptyMesh for the same pattern).
+	// TexImage2D() handles immediate uploads; TexLock()/TexUnlock() handle
+	// the lightmap system's lock-write-unlock pattern. Only uncompressed
+	// source formats are converted - most world/prop materials use DXT
+	// compression, which isn't decoded here, so those textures stay on the
+	// flat white fallback for now.
+	//-------------------------------------------------------------------------
+	struct VulkanTexture
+	{
+		VkImage image = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+		VkImageView view = VK_NULL_HANDLE;
+		int width = 0;
+		int height = 0;
+		bool imageCreated = false;
+		bool hasData = false;
+	};
+
+	// Handle N maps to g_Textures[N-1] (handle 0 always means "no texture") -
+	// this NDK's libc++ has a broken std::vector(count[, value]) sized
+	// constructor (fails to compile - a genuine toolchain bug, not
+	// something in our code), so this stays default-constructed and only
+	// ever grows via push_back(), matching the convention already used
+	// throughout vr_xr_vulkan.cpp.
+	std::vector<VulkanTexture> g_Textures;
+	ShaderAPITextureHandle_t g_ModifyTextureHandle = 0;
+	ShaderAPITextureHandle_t g_BoundTexture0 = 0; // stage 0 (base texture) only
+
+	unsigned char *g_pTexLockScratch = NULL;
+	size_t g_nTexLockScratchSize = 0;
+	int g_nTexLockWidth = 0, g_nTexLockHeight = 0;
+
+	bool IsValidTextureHandle( ShaderAPITextureHandle_t h )
+	{
+		return h > 0 && (size_t)h <= g_Textures.size();
+	}
+
+	// Only call once IsValidTextureHandle(h) is true.
+	VulkanTexture &GetTexture( ShaderAPITextureHandle_t h )
+	{
+		return g_Textures[h - 1];
+	}
+
+	bool EnsureTextureImage( VulkanTexture &tex )
+	{
+		if ( tex.imageCreated )
+			return true;
+		if ( VRXR_GetDevice() == VK_NULL_HANDLE || tex.width <= 0 || tex.height <= 0 )
+			return false;
+
+		if ( !VRXR_CreateImage2D( tex.width, tex.height, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &tex.image, &tex.memory ) )
+			return false;
+
+		tex.view = CreateImageViewRgba8( tex.image );
+		if ( tex.view == VK_NULL_HANDLE )
+			return false;
+
+		tex.imageCreated = true;
+		return true;
+	}
+
+	// Converts numPixels of srcFormat data to RGBA8. Returns false (nothing
+	// written) for compressed or unrecognized formats.
+	bool ConvertToRgba8( ImageFormat srcFormat, const unsigned char *pSrc, unsigned char *pDst, int numPixels )
+	{
+		switch ( srcFormat )
+		{
+		case IMAGE_FORMAT_RGBA8888:
+			memcpy( pDst, pSrc, (size_t)numPixels * 4 );
+			return true;
+		case IMAGE_FORMAT_BGRA8888:
+			for ( int i = 0; i < numPixels; i++ )
+			{
+				pDst[i*4+0] = pSrc[i*4+2];
+				pDst[i*4+1] = pSrc[i*4+1];
+				pDst[i*4+2] = pSrc[i*4+0];
+				pDst[i*4+3] = pSrc[i*4+3];
+			}
+			return true;
+		case IMAGE_FORMAT_BGRX8888:
+			for ( int i = 0; i < numPixels; i++ )
+			{
+				pDst[i*4+0] = pSrc[i*4+2];
+				pDst[i*4+1] = pSrc[i*4+1];
+				pDst[i*4+2] = pSrc[i*4+0];
+				pDst[i*4+3] = 255;
+			}
+			return true;
+		case IMAGE_FORMAT_RGB888:
+			for ( int i = 0; i < numPixels; i++ )
+			{
+				pDst[i*4+0] = pSrc[i*3+0];
+				pDst[i*4+1] = pSrc[i*3+1];
+				pDst[i*4+2] = pSrc[i*3+2];
+				pDst[i*4+3] = 255;
+			}
+			return true;
+		case IMAGE_FORMAT_BGR888:
+			for ( int i = 0; i < numPixels; i++ )
+			{
+				pDst[i*4+0] = pSrc[i*3+2];
+				pDst[i*4+1] = pSrc[i*3+1];
+				pDst[i*4+2] = pSrc[i*3+0];
+				pDst[i*4+3] = 255;
+			}
+			return true;
+		case IMAGE_FORMAT_I8:
+			for ( int i = 0; i < numPixels; i++ )
+			{
+				pDst[i*4+0] = pDst[i*4+1] = pDst[i*4+2] = pSrc[i];
+				pDst[i*4+3] = 255;
+			}
+			return true;
+		case IMAGE_FORMAT_IA88:
+			for ( int i = 0; i < numPixels; i++ )
+			{
+				pDst[i*4+0] = pDst[i*4+1] = pDst[i*4+2] = pSrc[i*2+0];
+				pDst[i*4+3] = pSrc[i*2+1];
+			}
+			return true;
+		case IMAGE_FORMAT_A8:
+			for ( int i = 0; i < numPixels; i++ )
+			{
+				pDst[i*4+0] = pDst[i*4+1] = pDst[i*4+2] = 255;
+				pDst[i*4+3] = pSrc[i];
+			}
+			return true;
+		default:
+			return false;
+		}
+	}
+}
 #endif
 
 
@@ -114,11 +461,39 @@ public:
 private:
 	enum
 	{
-		VERTEX_BUFFER_SIZE = 1024 * 1024
+		VERTEX_BUFFER_SIZE = 1024 * 1024,
+		INDEX_BUFFER_COUNT = 65536
 	};
 
 	unsigned char* m_pVertexMemory;
 	bool m_bIsDynamic;
+
+#if defined( ANDROID )
+	bool EnsureGpuBuffers();
+	void UploadToGpu( int numVerts, int numIndices );
+
+	unsigned short *m_pIndexMemory;
+	float m_DummyAttrib[4];
+
+	// Allocated once (lazily, on first use after the Vulkan device exists)
+	// and persistently mapped for the lifetime of this object, rather than
+	// a fresh VkBuffer/vkAllocateMemory per Lock/Unlock cycle - meshes here
+	// get re-locked and re-uploaded constantly (every world surface during
+	// level load, every dynamic/UI draw every frame), and allocating +
+	// freeing real device memory that often is both slow enough to look
+	// like a hang and, if ever deferred instead, enough to blow through the
+	// device's live allocation budget (VK_ERROR_OUT_OF_DEVICE_MEMORY).
+	bool m_bGpuBuffersReady;
+	VkBuffer m_hVB;
+	VkDeviceMemory m_hVBMem;
+	void *m_pMappedVB;
+	VkBuffer m_hIB;
+	VkDeviceMemory m_hIBMem;
+	void *m_pMappedIB;
+	int m_nPendingVerts;
+	int m_nPendingIndices;
+	int m_nDrawIndexCount;
+#endif
 };
 
 
@@ -319,7 +694,10 @@ public:
 			}
 		}
 
-		VRXR_PresentFrame();
+		// Safety net in case ClearBuffers() wasn't hit this frame for some
+		// reason - VRXR_BeginSceneIfNeeded() is idempotent.
+		VRXR_BeginSceneIfNeeded();
+		VRXR_EndSceneAndPresent();
 #endif
 	}
 	virtual void GetWindowSize( int &width, int &height ) const;
@@ -1528,21 +1906,125 @@ IIndexBuffer *CShaderDeviceEmpty::GetDynamicIndexBuffer( MaterialIndexFormat_t f
 CEmptyMesh::CEmptyMesh( bool bIsDynamic ) : m_bIsDynamic( bIsDynamic )
 {
 	m_pVertexMemory = new unsigned char[VERTEX_BUFFER_SIZE];
+#if defined( ANDROID )
+	m_pIndexMemory = new unsigned short[INDEX_BUFFER_COUNT];
+	memset( m_DummyAttrib, 0, sizeof( m_DummyAttrib ) );
+	m_bGpuBuffersReady = false;
+	m_hVB = VK_NULL_HANDLE;
+	m_hVBMem = VK_NULL_HANDLE;
+	m_pMappedVB = NULL;
+	m_hIB = VK_NULL_HANDLE;
+	m_hIBMem = VK_NULL_HANDLE;
+	m_pMappedIB = NULL;
+	m_nPendingVerts = 0;
+	m_nPendingIndices = 0;
+	m_nDrawIndexCount = 0;
+#endif
 }
 
 CEmptyMesh::~CEmptyMesh()
 {
 	delete[] m_pVertexMemory;
+#if defined( ANDROID )
+	delete[] m_pIndexMemory;
+	if ( m_bGpuBuffersReady )
+	{
+		vkDestroyBuffer( VRXR_GetDevice(), m_hVB, NULL );
+		vkFreeMemory( VRXR_GetDevice(), m_hVBMem, NULL );
+		vkDestroyBuffer( VRXR_GetDevice(), m_hIB, NULL );
+		vkFreeMemory( VRXR_GetDevice(), m_hIBMem, NULL );
+	}
+#endif
 }
+
+#if defined( ANDROID )
+// Allocates and persistently maps this mesh's GPU vertex/index buffers on
+// first use (once the Vulkan device actually exists - Lock()/UnlockMesh()
+// get called well before that, e.g. for early UI/font setup). Deliberately
+// NOT per-Lock/Unlock: this codebase re-locks and re-uploads these two
+// shared mesh objects constantly (every world surface during level load,
+// every dynamic/UI draw every frame), and a fresh vkAllocateMemory +
+// vkFreeMemory per cycle turned out to be both slow enough to look like a
+// hang and, when destruction was ever deferred instead, enough to exhaust
+// the device's live allocation budget (VK_ERROR_OUT_OF_DEVICE_MEMORY). One
+// allocation per mesh object, kept for the process lifetime, sidesteps
+// both problems.
+bool CEmptyMesh::EnsureGpuBuffers()
+{
+	if ( m_bGpuBuffersReady )
+		return true;
+
+	if ( VRXR_GetDevice() == VK_NULL_HANDLE )
+		return false;
+
+	HL2VR_DIAG( "EnsureGpuBuffers: creating (mesh=%p dynamic=%d)", (void*)this, (int)m_bIsDynamic );
+
+	VkMemoryPropertyFlags hostProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	if ( !VRXR_CreateBuffer( VERTEX_BUFFER_SIZE, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hostProps, &m_hVB, &m_hVBMem ) )
+	{
+		HL2VR_DIAG( "EnsureGpuBuffers: VB create failed" );
+		return false;
+	}
+	if ( !VRXR_CreateBuffer( INDEX_BUFFER_COUNT * sizeof( unsigned short ), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, hostProps, &m_hIB, &m_hIBMem ) )
+	{
+		HL2VR_DIAG( "EnsureGpuBuffers: IB create failed" );
+		vkDestroyBuffer( VRXR_GetDevice(), m_hVB, NULL );
+		vkFreeMemory( VRXR_GetDevice(), m_hVBMem, NULL );
+		m_hVB = VK_NULL_HANDLE;
+		m_hVBMem = VK_NULL_HANDLE;
+		return false;
+	}
+
+	vkMapMemory( VRXR_GetDevice(), m_hVBMem, 0, VERTEX_BUFFER_SIZE, 0, &m_pMappedVB );
+	vkMapMemory( VRXR_GetDevice(), m_hIBMem, 0, INDEX_BUFFER_COUNT * sizeof( unsigned short ), 0, &m_pMappedIB );
+
+	HL2VR_DIAG( "EnsureGpuBuffers: ready (mesh=%p)", (void*)this );
+	m_bGpuBuffersReady = true;
+	return true;
+}
+
+void CEmptyMesh::UploadToGpu( int numVerts, int numIndices )
+{
+	m_nDrawIndexCount = 0;
+
+	if ( numVerts <= 0 || numIndices <= 0 )
+		return;
+
+	if ( (size_t)numVerts * 20 > VERTEX_BUFFER_SIZE || (size_t)numIndices > INDEX_BUFFER_COUNT )
+		return;
+
+	// Device (and therefore these buffers) may not exist yet this early -
+	// that's fine, this lock/unlock's data just won't be drawable until a
+	// later re-lock happens once VRXR_Init() has run.
+	if ( !EnsureGpuBuffers() )
+		return;
+
+	memcpy( m_pMappedVB, m_pVertexMemory, (size_t)numVerts * 20 );
+	memcpy( m_pMappedIB, m_pIndexMemory, (size_t)numIndices * sizeof( unsigned short ) );
+
+	m_nDrawIndexCount = numIndices;
+}
+#endif
 
 bool CEmptyMesh::Lock( int nMaxIndexCount, bool bAppend, IndexDesc_t& desc )
 {
+#if defined( ANDROID )
+	if ( nMaxIndexCount > (int)INDEX_BUFFER_COUNT )
+		nMaxIndexCount = INDEX_BUFFER_COUNT;
+	desc.m_pIndices = m_pIndexMemory;
+	desc.m_nIndexSize = 1;
+	desc.m_nFirstIndex = 0;
+	desc.m_nOffset = 0;
+	m_nPendingIndices = nMaxIndexCount;
+	return true;
+#else
 	static int s_BogusIndex;
 	desc.m_pIndices = (unsigned short*)&s_BogusIndex;
 	desc.m_nIndexSize = 0;
 	desc.m_nFirstIndex = 0;
 	desc.m_nOffset = 0;
 	return true;
+#endif
 }
 
 void CEmptyMesh::Unlock( int nWrittenIndexCount, IndexDesc_t& desc )
@@ -1568,6 +2050,52 @@ void CEmptyMesh::ValidateData( int nIndexCount, const IndexDesc_t &desc )
 
 bool CEmptyMesh::Lock( int nVertexCount, bool bAppend, VertexDesc_t &desc )
 {
+#if defined( ANDROID )
+	// Fixed layout matching basic.vert / the pipeline's vertex input state in
+	// vr_xr_vulkan.cpp: interleaved [ position(3f)@0, texcoord0(2f)@12 ],
+	// stride 20 bytes. Every other attribute the engine might write is
+	// routed to a small scratch buffer (m_DummyAttrib, stride 0) - harmless
+	// since ComputeVertexFormat()/ComputeVertexUsage() only ever report
+	// VERTEX_POSITION|VERTEX_TEXCOORD_SIZE(0,2), so CMeshBuilder shouldn't be
+	// writing those fields anyway.
+	const int stride = 20;
+	if ( (size_t)nVertexCount * stride > VERTEX_BUFFER_SIZE )
+		nVertexCount = VERTEX_BUFFER_SIZE / stride;
+
+	desc.m_pPosition = (float*)m_pVertexMemory;
+	desc.m_VertexSize_Position = stride;
+
+	desc.m_pTexCoord[0] = (float*)( m_pVertexMemory + 12 );
+	desc.m_VertexSize_TexCoord[0] = stride;
+	for ( int i = 1; i < VERTEX_MAX_TEXTURE_COORDINATES; ++i )
+	{
+		desc.m_pTexCoord[i] = (float*)m_DummyAttrib;
+		desc.m_VertexSize_TexCoord[i] = 0;
+	}
+
+	desc.m_pNormal = (float*)m_DummyAttrib;
+	desc.m_pColor = (unsigned char*)m_DummyAttrib;
+	desc.m_pBoneWeight = (float*)m_DummyAttrib;
+	desc.m_pBoneMatrixIndex = (unsigned char*)m_DummyAttrib;
+	desc.m_pTangentS = (float*)m_DummyAttrib;
+	desc.m_pTangentT = (float*)m_DummyAttrib;
+	desc.m_pUserData = (float*)m_DummyAttrib;
+	desc.m_NumBoneWeights = 0;
+
+	desc.m_VertexSize_BoneWeight = 0;
+	desc.m_VertexSize_BoneMatrixIndex = 0;
+	desc.m_VertexSize_Normal = 0;
+	desc.m_VertexSize_Color = 0;
+	desc.m_VertexSize_TangentS = 0;
+	desc.m_VertexSize_TangentT = 0;
+	desc.m_VertexSize_UserData = 0;
+	desc.m_ActualVertexSize = stride;
+
+	desc.m_nFirstVertex = 0;
+	desc.m_nOffset = 0;
+	m_nPendingVerts = nVertexCount;
+	return true;
+#else
 	// Who cares about the data?
 	desc.m_pPosition = (float*)m_pVertexMemory;
 	desc.m_pNormal = (float*)m_pVertexMemory;
@@ -1603,6 +2131,7 @@ bool CEmptyMesh::Lock( int nVertexCount, bool bAppend, VertexDesc_t &desc )
 	desc.m_nFirstVertex = 0;
 	desc.m_nOffset = 0;
 	return true;
+#endif
 }
 
 void CEmptyMesh::Unlock( int nVertexCount, VertexDesc_t &desc )
@@ -1625,6 +2154,9 @@ void CEmptyMesh::LockMesh( int numVerts, int numIndices, MeshDesc_t& desc )
 
 void CEmptyMesh::UnlockMesh( int numVerts, int numIndices, MeshDesc_t& desc )
 {
+#if defined( ANDROID )
+	UploadToGpu( numVerts, numIndices );
+#endif
 }
 
 void CEmptyMesh::ModifyBeginEx( bool bReadOnly, int firstVertex, int numVerts, int firstIndex, int numIndices, MeshDesc_t& desc )
@@ -1645,7 +2177,11 @@ void CEmptyMesh::ModifyEnd( MeshDesc_t& desc )
 // returns the # of vertices (static meshes only)
 int CEmptyMesh::VertexCount() const
 {
+#if defined( ANDROID )
+	return m_nPendingVerts;
+#else
 	return 0;
+#endif
 }
 
 // Sets the primitive type
@@ -1656,10 +2192,43 @@ void CEmptyMesh::SetPrimitiveType( MaterialPrimitiveType_t type )
 // Draws the entire mesh
 void CEmptyMesh::Draw( int firstIndex, int numIndices )
 {
+#if defined( ANDROID )
+	if ( m_hVB == VK_NULL_HANDLE || m_hIB == VK_NULL_HANDLE || m_nDrawIndexCount <= 0 )
+		return;
+
+	int first = ( firstIndex > 0 ) ? firstIndex : 0;
+	int count = ( numIndices > 0 ) ? numIndices : ( m_nDrawIndexCount - first );
+	if ( first + count > m_nDrawIndexCount )
+		count = m_nDrawIndexCount - first;
+	if ( count <= 0 )
+		return;
+
+	float mvp[16];
+	ComputeMvp( mvp );
+
+	VkImageView textureView = VK_NULL_HANDLE;
+	if ( IsValidTextureHandle( g_BoundTexture0 ) )
+	{
+		VulkanTexture &tex = GetTexture( g_BoundTexture0 );
+		if ( tex.hasData && tex.view != VK_NULL_HANDLE )
+			textureView = tex.view;
+	}
+	if ( textureView == VK_NULL_HANDLE )
+		textureView = EnsureWhiteTexture();
+	if ( textureView == VK_NULL_HANDLE )
+		return;
+
+	VRXR_DrawIndexed( m_hVB, 0, m_hIB, (VkDeviceSize)first * sizeof( unsigned short ),
+		(uint32_t)count, mvp, textureView, VRXR_GetDefaultSampler() );
+#endif
 }
 
 void CEmptyMesh::Draw(CPrimList *pPrims, int nPrims)
 {
+#if defined( ANDROID )
+	for ( int i = 0; i < nPrims; ++i )
+		Draw( pPrims[i].m_FirstIndex, pPrims[i].m_NumIndices );
+#endif
 }
 
 // Copy verts and/or indices to a mesh builder. This only works for temp meshes!
@@ -2266,13 +2835,25 @@ bool CShaderAPIEmpty::UsesVertexAndPixelShaders( StateSnapshot_t id ) const
 // Gets the vertex format for a set of snapshot ids
 VertexFormat_t CShaderAPIEmpty::ComputeVertexFormat( int numSnapshots, StateSnapshot_t* pIds ) const
 {
+#if defined( ANDROID )
+	// Our fixed pipeline only ever writes position + texcoord0 (see
+	// CEmptyMesh::Lock/basic.vert) - report that unconditionally so
+	// CMeshBuilder actually writes real data instead of treating
+	// Position3fv/TexCoord2f as writes to dummy memory.
+	return VERTEX_POSITION | VERTEX_TEXCOORD_SIZE( 0, 2 );
+#else
 	return 0;
+#endif
 }
 
 // Gets the vertex format for a set of snapshot ids
 VertexFormat_t CShaderAPIEmpty::ComputeVertexUsage( int numSnapshots, StateSnapshot_t* pIds ) const
 {
+#if defined( ANDROID )
+	return VERTEX_POSITION | VERTEX_TEXCOORD_SIZE( 0, 2 );
+#else
 	return 0;
+#endif
 }
 
 // Uses a state snapshot
@@ -2478,34 +3059,91 @@ void CShaderAPIEmpty::RenderPass( int nPass, int nPassCount )
 // stuff related to matrix stacks
 void CShaderAPIEmpty::MatrixMode( MaterialMatrixMode_t matrixMode )
 {
+#if defined( ANDROID )
+	g_CurMatMode = matrixMode;
+#endif
 }
 
 void CShaderAPIEmpty::PushMatrix()
 {
+#if defined( ANDROID )
+	EnsureMatStacksInit();
+	MatrixStackState &s = g_MatStacks[g_CurMatMode];
+	if ( s.depth + 1 < (int)( sizeof( s.stack ) / sizeof( s.stack[0] ) ) )
+	{
+		memcpy( s.stack[s.depth + 1], s.stack[s.depth], sizeof( Mat4 ) );
+		s.depth++;
+	}
+#endif
 }
 
 void CShaderAPIEmpty::PopMatrix()
 {
+#if defined( ANDROID )
+	EnsureMatStacksInit();
+	MatrixStackState &s = g_MatStacks[g_CurMatMode];
+	if ( s.depth > 0 )
+		s.depth--;
+#endif
 }
 
 void CShaderAPIEmpty::LoadMatrix( float *m )
 {
+#if defined( ANDROID )
+	// The engine's LoadMatrix()/MultMatrix() calls turned out to hand us
+	// matrices in the opposite row/column convention from what we assumed
+	// (VMatrix-style row-major) - diagnostic logging showed MVP matrices
+	// with wildly large, erratic coefficients (translation components
+	// landing in the wrong slots during composition), which rendered as
+	// scattered degenerate triangles/lines instead of solid geometry.
+	// Transposing at this boundary (the only place engine-supplied
+	// matrices enter our row-major internal storage) fixes it without
+	// touching our own self-consistent Translate/Rotate/Scale/Mat4Mul code.
+	Mat4 transposed;
+	Mat4Transpose( transposed, m );
+	memcpy( CurMat( g_CurMatMode ), transposed, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::MultMatrix( float *m )
 {
+#if defined( ANDROID )
+	Mat4 transposed;
+	Mat4Transpose( transposed, m );
+	Mat4 &cur = CurMat( g_CurMatMode );
+	Mat4 result;
+	Mat4Mul( result, cur, transposed );
+	memcpy( cur, result, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::MultMatrixLocal( float *m )
 {
+#if defined( ANDROID )
+	Mat4 transposed;
+	Mat4Transpose( transposed, m );
+	Mat4 &cur = CurMat( g_CurMatMode );
+	Mat4 result;
+	Mat4Mul( result, transposed, cur );
+	memcpy( cur, result, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::GetMatrix( MaterialMatrixMode_t matrixMode, float *dst )
 {
+#if defined( ANDROID )
+	// Symmetric with LoadMatrix()'s transpose - callers that round-trip a
+	// matrix out via GetMatrix() and back in via LoadMatrix() should see
+	// their own convention preserved.
+	Mat4Transpose( dst, CurMat( matrixMode ) );
+#endif
 }
 
 void CShaderAPIEmpty::LoadIdentity( void )
 {
+#if defined( ANDROID )
+	Mat4Identity( CurMat( g_CurMatMode ) );
+#endif
 }
 
 void CShaderAPIEmpty::LoadCameraToWorld( void )
@@ -2514,14 +3152,59 @@ void CShaderAPIEmpty::LoadCameraToWorld( void )
 
 void CShaderAPIEmpty::Ortho( double left, double top, double right, double bottom, double zNear, double zFar )
 {
+#if defined( ANDROID )
+	Mat4 ortho;
+	Mat4Identity( ortho );
+	ortho[0] = 2.0f / (float)( right - left );
+	ortho[5] = 2.0f / (float)( bottom - top ); // Vulkan clip-space Y+ is down, matches top<bottom screen convention directly
+	ortho[10] = 1.0f / (float)( zFar - zNear );
+	ortho[3] = (float)( -( right + left ) / ( right - left ) );
+	ortho[7] = (float)( -( bottom + top ) / ( bottom - top ) );
+	ortho[11] = (float)( -zNear / ( zFar - zNear ) );
+
+	Mat4 &cur = CurMat( g_CurMatMode );
+	Mat4 result;
+	Mat4Mul( result, cur, ortho );
+	memcpy( cur, result, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::PerspectiveX( double fovx, double aspect, double zNear, double zFar )
 {
+#if defined( ANDROID )
+	// Column-vector, row-major, left-handed camera space (X=right, Y=up,
+	// Z=forward) mapping to Vulkan's [0,1] clip-space Z - matches how the
+	// view matrix the engine hands us via LoadMatrix(MATERIAL_VIEW) is
+	// built. Y is negated so the image comes out right-side-up: our
+	// swapchain images are rendered with a standard (non Y-flipped) dynamic
+	// viewport, so without this the frame would come out upside-down versus
+	// Vulkan's Y-down clip space.
+	float xScale = 1.0f / tanf( (float)( fovx * ( M_PI / 180.0 ) ) * 0.5f );
+	float yScale = -xScale * (float)aspect;
+	float zf = (float)zFar;
+	float zn = (float)zNear;
+
+	Mat4 proj;
+	memset( proj, 0, sizeof( Mat4 ) );
+	proj[0] = xScale;
+	proj[5] = yScale;
+	proj[10] = zf / ( zf - zn );
+	proj[11] = -zn * zf / ( zf - zn );
+	proj[14] = 1.0f;
+
+	memcpy( CurMat( g_CurMatMode ), proj, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::PerspectiveOffCenterX( double fovx, double aspect, double zNear, double zFar, double bottom, double top, double left, double right )
 {
+#if defined( ANDROID )
+	// Not yet implemented precisely (off-center/asymmetric frustum, used for
+	// some VR/split-screen paths) - fall back to a symmetric projection so
+	// there's at least a sane projection matrix rather than a stale/identity
+	// one.
+	PerspectiveX( fovx, aspect, zNear, zFar );
+#endif
 }
 
 void CShaderAPIEmpty::PickMatrix( int x, int y, int width, int height )
@@ -2530,18 +3213,67 @@ void CShaderAPIEmpty::PickMatrix( int x, int y, int width, int height )
 
 void CShaderAPIEmpty::Rotate( float angle, float x, float y, float z )
 {
+#if defined( ANDROID )
+	float rad = angle * ( (float)M_PI / 180.0f );
+	float c = cosf( rad );
+	float s = sinf( rad );
+	float len = sqrtf( x * x + y * y + z * z );
+	if ( len < 1e-8f )
+		return;
+	x /= len; y /= len; z /= len;
+
+	Mat4 rot;
+	Mat4Identity( rot );
+	rot[0] = c + x * x * ( 1 - c );
+	rot[1] = x * y * ( 1 - c ) - z * s;
+	rot[2] = x * z * ( 1 - c ) + y * s;
+	rot[4] = y * x * ( 1 - c ) + z * s;
+	rot[5] = c + y * y * ( 1 - c );
+	rot[6] = y * z * ( 1 - c ) - x * s;
+	rot[8] = z * x * ( 1 - c ) - y * s;
+	rot[9] = z * y * ( 1 - c ) + x * s;
+	rot[10] = c + z * z * ( 1 - c );
+
+	Mat4 &cur = CurMat( g_CurMatMode );
+	Mat4 result;
+	Mat4Mul( result, cur, rot );
+	memcpy( cur, result, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::Translate( float x, float y, float z )
 {
+#if defined( ANDROID )
+	Mat4 t;
+	Mat4Identity( t );
+	t[3] = x; t[7] = y; t[11] = z;
+
+	Mat4 &cur = CurMat( g_CurMatMode );
+	Mat4 result;
+	Mat4Mul( result, cur, t );
+	memcpy( cur, result, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::Scale( float x, float y, float z )
 {
+#if defined( ANDROID )
+	Mat4 s;
+	Mat4Identity( s );
+	s[0] = x; s[5] = y; s[10] = z;
+
+	Mat4 &cur = CurMat( g_CurMatMode );
+	Mat4 result;
+	Mat4Mul( result, cur, s );
+	memcpy( cur, result, sizeof( Mat4 ) );
+#endif
 }
 
 void CShaderAPIEmpty::ScaleXY( float x, float y )
 {
+#if defined( ANDROID )
+	Scale( x, y, 1.0f );
+#endif
 }
 
 // Fog methods...
@@ -2685,6 +3417,12 @@ ImageFormat CShaderAPIEmpty::GetNearestRenderTargetFormat( ImageFormat fmt ) con
 // Sets the texture state
 void CShaderAPIEmpty::BindTexture( Sampler_t stage, ShaderAPITextureHandle_t textureHandle )
 {
+#if defined( ANDROID )
+	// Our fixed pipeline only samples one texture per draw - only track the
+	// base texture stage (0); lightmaps/other stages are ignored for now.
+	if ( stage == 0 )
+		g_BoundTexture0 = textureHandle;
+#endif
 }
 
 void CShaderAPIEmpty::ClearColor3ub( unsigned char r, unsigned char g, unsigned char b )
@@ -2700,12 +3438,33 @@ void CShaderAPIEmpty::ClearColor4ub( unsigned char r, unsigned char g, unsigned 
 // all use the texture specified by this function.
 void CShaderAPIEmpty::ModifyTexture( ShaderAPITextureHandle_t textureHandle )
 {
+#if defined( ANDROID )
+	g_ModifyTextureHandle = textureHandle;
+#endif
 }
 
 // Texture management methods
-void CShaderAPIEmpty::TexImage2D( int level, int cubeFace, ImageFormat dstFormat, int zOffset, int width, int height, 
+void CShaderAPIEmpty::TexImage2D( int level, int cubeFace, ImageFormat dstFormat, int zOffset, int width, int height,
 						 ImageFormat srcFormat, bool bSrcIsTiled, void *imageData )
 {
+#if defined( ANDROID )
+	if ( !imageData || level != 0 || width <= 0 || height <= 0 || !IsValidTextureHandle( g_ModifyTextureHandle ) )
+		return;
+
+	VulkanTexture &tex = GetTexture( g_ModifyTextureHandle );
+	tex.width = width;
+	tex.height = height;
+	if ( !EnsureTextureImage( tex ) )
+		return;
+
+	std::vector<unsigned char> rgba;
+	rgba.resize( (size_t)width * height * 4 );
+	if ( !ConvertToRgba8( srcFormat, (const unsigned char *)imageData, rgba.data(), width * height ) )
+		return; // compressed/unrecognized format - stays on the white fallback
+
+	if ( UploadRgba8ToImage( tex.image, width, height, rgba.data() ) )
+		tex.hasData = true;
+#endif
 }
 
 void CShaderAPIEmpty::TexSubImage2D( int level, int cubeFace, int xOffset, int yOffset, int zOffset, int width, int height,
@@ -2717,14 +3476,58 @@ void CShaderAPIEmpty::TexImageFromVTF( IVTFTexture *pVTF, int iVTFFrame )
 {
 }
 
-bool CShaderAPIEmpty::TexLock( int level, int cubeFaceID, int xOffset, int yOffset, 
+bool CShaderAPIEmpty::TexLock( int level, int cubeFaceID, int xOffset, int yOffset,
 								int width, int height, CPixelWriter& writer )
 {
+#if defined( ANDROID )
+	// Used heavily by the lightmap system - callers gate level-load
+	// completion on this call actually succeeding, so it must return true
+	// (see the TexUnlock() comment for why the data isn't discarded
+	// anymore). writer always gets an RGBA8 scratch buffer regardless of
+	// the texture's real destination format; TexUnlock() uploads that
+	// buffer as-is (only correct for xOffset==yOffset==0, i.e. whole-image
+	// locks, which is the common case for lightmap pages).
+	if ( width <= 0 || height <= 0 )
+		return false;
+
+	int stride = width * 4;
+	size_t needed = (size_t)stride * (size_t)height;
+	if ( needed > g_nTexLockScratchSize )
+	{
+		free( g_pTexLockScratch );
+		g_pTexLockScratch = (unsigned char *)malloc( needed );
+		g_nTexLockScratchSize = g_pTexLockScratch ? needed : 0;
+	}
+	if ( !g_pTexLockScratch )
+		return false;
+
+	writer.SetPixelMemory( IMAGE_FORMAT_RGBA8888, g_pTexLockScratch, stride );
+	g_nTexLockWidth = width;
+	g_nTexLockHeight = height;
+	return true;
+#else
 	return false;
+#endif
 }
 
 void CShaderAPIEmpty::TexUnlock( )
 {
+#if defined( ANDROID )
+	if ( !g_pTexLockScratch || g_nTexLockWidth <= 0 || g_nTexLockHeight <= 0 || !IsValidTextureHandle( g_ModifyTextureHandle ) )
+		return;
+
+	VulkanTexture &tex = GetTexture( g_ModifyTextureHandle );
+	if ( tex.width <= 0 )
+	{
+		tex.width = g_nTexLockWidth;
+		tex.height = g_nTexLockHeight;
+	}
+	if ( !EnsureTextureImage( tex ) )
+		return;
+
+	if ( UploadRgba8ToImage( tex.image, g_nTexLockWidth, g_nTexLockHeight, g_pTexLockScratch ) )
+		tex.hasData = true;
+#endif
 }
 
 
@@ -2756,7 +3559,17 @@ ShaderAPITextureHandle_t CShaderAPIEmpty::CreateTexture(
 	const char *pDebugName,
 	const char *pTextureGroupName )
 {
+#if defined( ANDROID )
+	// The Vulkan image itself is created lazily (EnsureTextureImage(), on
+	// first TexImage2D/TexUnlock upload) since the device may not exist yet.
+	VulkanTexture tex;
+	tex.width = width;
+	tex.height = height;
+	g_Textures.push_back( tex );
+	return (ShaderAPITextureHandle_t)g_Textures.size();
+#else
 	return 0;
+#endif
 }
 
 // Create a multi-frame texture (equivalent to calling "CreateTexture" multiple times, but more efficient)
@@ -2774,7 +3587,17 @@ void CShaderAPIEmpty::CreateTextures(
 							const char *pTextureGroupName )
 {
 	for ( int k = 0; k < count; ++ k )
+	{
+#if defined( ANDROID )
+		VulkanTexture tex;
+		tex.width = width;
+		tex.height = height;
+		g_Textures.push_back( tex );
+		pHandles[ k ] = (ShaderAPITextureHandle_t)g_Textures.size();
+#else
 		pHandles[ k ] = 0;
+#endif
+	}
 }
 
 
@@ -2800,6 +3623,12 @@ bool CShaderAPIEmpty::IsTextureResident( ShaderAPITextureHandle_t textureHandle 
 // stuff that isn't to be used from within a shader
 void CShaderAPIEmpty::ClearBuffers( bool bClearColor, bool bClearDepth, bool bClearStencil, int renderTargetWidth, int renderTargetHeight )
 {
+#if defined( ANDROID )
+	// The render pass always clears on load (see CreateRenderPass() in
+	// vr_xr_vulkan.cpp) - this just makes sure a scene/command buffer is
+	// open before any of the draws that follow it.
+	VRXR_BeginSceneIfNeeded();
+#endif
 }
 
 void CShaderAPIEmpty::ClearBuffersObeyStencil( bool bClearColor, bool bClearDepth )
