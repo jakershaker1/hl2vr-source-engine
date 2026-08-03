@@ -752,7 +752,7 @@ bool CSourceAppSystemGroup::Create()
 	// Load up the appropriate shader DLL
 	// This has to be done before connection.
 #if defined( ANDROID )
-	char const* pDLLName = "shaderapivulkan" DLL_EXT_STRING;
+	char const* pDLLName = "shaderapidx9dxvk" DLL_EXT_STRING;
 #else
 	char const* pDLLName = "shaderapidx9" DLL_EXT_STRING;
 #endif

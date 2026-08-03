@@ -23,6 +23,13 @@ enum NormalDecodeMode_t
 // Forward declaration
 #ifdef _WIN32
 typedef enum _D3DFORMAT D3DFORMAT;
+#elif defined( DXVK_NATIVE )
+// D3DFORMAT is referenced unconditionally below (D3DFormatToImageFormat etc),
+// but unlike on Windows this header isn't guaranteed to be reached only
+// after d3d9.h - some TUs pull this in first via materialsystem/imaterial.h.
+// Pull in the real DXVK-backed d3d9.h ourselves; rendermechanism.h's include
+// guard makes this a no-op if it's already been included in this TU.
+#include "togl/rendermechanism.h"
 #endif
 
 //-----------------------------------------------------------------------------
@@ -108,7 +115,7 @@ enum ImageFormat
 	NUM_IMAGE_FORMATS
 };
 
-#if defined( POSIX  ) || defined( DX_TO_GL_ABSTRACTION )
+#if ( defined( POSIX  ) || defined( DX_TO_GL_ABSTRACTION ) ) && !defined( DXVK_NATIVE )
 typedef enum _D3DFORMAT
 	{
 		D3DFMT_INDEX16,

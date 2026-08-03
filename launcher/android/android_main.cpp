@@ -101,6 +101,36 @@ namespace
 				setenv( "VALVE_GAME_PATH", gamePath, 1 );
 				__android_log_print( ANDROID_LOG_INFO, "hl2vr", "VALVE_GAME_PATH=%s", gamePath );
 
+				// DXVK Native's logger writes Info+ level to a file (path from
+				// DXVK_LOG_PATH) - handy for diagnosing device/init failures
+				// on-device, since std::cerr doesn't reliably reach logcat.
+				// internalDataPath (not external) - reliably reachable via
+				// `adb shell run-as`, unlike this device's external storage.
+				setenv( "DXVK_LOG_PATH", app->activity->internalDataPath, 1 );
+				setenv( "DXVK_LOG_LEVEL", "debug", 1 );
+				// DXVK has no sensible default WSI backend on non-Windows
+				// platforms (see dxvk_native/src/wsi/wsi_platform.cpp) -
+				// without this it throws during DxvkInstance construction,
+				// on DXVK's own internal thread, before anything is logged.
+				// "Headless" is our own custom WSI backend added to that
+				// file - SDL2's real Android video backend needs JNI
+				// bootstrapping via its own Java Activity class, which this
+				// android_native_app_glue-based app never performs, and we
+				// don't need DXVK's swapchain to be visible on screen
+				// anyway (see dxvk_xr_bridge.cpp).
+				setenv( "DXVK_WSI_DRIVER", "Headless", 1 );
+
+				// VK_EXT_headless_surface isn't supported by this device's
+				// Vulkan driver (confirmed on-device), so the "Headless" WSI
+				// driver actually uses VK_KHR_android_surface (which is
+				// supported) against this app's real ANativeWindow instead -
+				// safe to share since our own OpenXR/Vulkan rendering
+				// (vr_xr_vulkan.cpp) never touches the raw 2D window, only
+				// OpenXR's own swapchain.
+				char nativeWindowHex[32];
+				snprintf( nativeWindowHex, sizeof( nativeWindowHex ), "%llx", (unsigned long long)(uintptr_t)app->window );
+				setenv( "HL2VR_ANATIVE_WINDOW", nativeWindowHex, 1 );
+
 				SetAppLibPathEnv( app );
 				pthread_create( &g_engineThread, NULL, EngineThreadEntry, NULL );
 			}

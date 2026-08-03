@@ -66,6 +66,50 @@
 			#include "../../dx9sdk/include/d3dx9.h"
 		#endif
 		typedef HWND VD3DHWND;
+	#elif defined( DXVK_NATIVE )
+		// Non-Windows target running the real D3D9 renderer via DXVK Native
+		// (DirectX9-on-Vulkan). windows.h/d3d9.h here are DXVK's own portable
+		// headers (vendored at dxvk_native/include/native/{windows,directx}),
+		// not the real Windows SDK - they provide just enough of HWND/HRESULT/
+		// IUnknown/etc for this code to compile and link against
+		// libdxvk_d3d9.so, matching DXVK Native's own build. Deliberately NOT
+		// including the full d3dx9.h "kitchen sink" header here - its legacy
+		// mesh/font/animation authoring-tool sub-headers (d3dx9mesh.h etc,
+		// not used by the runtime renderer) don't compile clean against
+		// DXVK's minimal windows.h, and this build already doesn't link a
+		// separate D3DX9 library for non-win32 targets (see this module's
+		// wscript). d3dx9.h's math/shader sub-headers (D3DXMATRIX,
+		// ID3DXBuffer, D3DXGetShaderVersion etc) ARE needed by the renderer,
+		// but its legacy mesh/font/animation authoring-tool sub-headers
+		// (d3dx9mesh.h/d3dx9shape.h/d3dx9anim.h, transitively pulled in by
+		// d3dx9.h's own #includes - unused at runtime but not separable)
+		// reference a handful of COM/GDI types DXVK's minimal windows.h
+		// never defines, since DXVK's own build never touches those
+		// sub-headers either. Shim just those in before pulling d3dx9.h.
+		#include <windows.h>
+		struct IStream;
+		struct GLYPHMETRICSFLOAT;
+		struct TEXTMETRICA;
+		struct TEXTMETRICW;
+		typedef double DOUBLE;
+		typedef GUID *LPGUID;
+		#define LF_FACESIZE 32
+		#ifndef EXTERN_C
+			#ifdef __cplusplus
+				#define EXTERN_C extern "C"
+			#else
+				#define EXTERN_C extern
+			#endif
+		#endif
+		#ifndef STDAPICALLTYPE
+			#define STDAPICALLTYPE WINAPI
+		#endif
+		#ifndef STDAPI
+			#define STDAPI EXTERN_C HRESULT STDAPICALLTYPE
+		#endif
+		#include <d3d9.h>
+		#include <d3dx9.h>
+		typedef HWND VD3DHWND;
 	#endif
 
 	#define	GLMPRINTF(args)	

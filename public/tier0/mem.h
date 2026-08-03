@@ -39,7 +39,7 @@ MEM_INTERFACE void *MemAllocScratch( int nMemSize );
 MEM_INTERFACE void MemFreeScratch();
 MEM_INTERFACE void MemAllocOOMError( size_t nSize );
 
-#ifdef _LINUX
+#if defined( _LINUX ) && !defined( DXVK_NATIVE ) // DXVK's own portable windows.h already provides a ZeroMemory macro
 MEM_INTERFACE void ZeroMemory( void *mem, size_t length );
 #endif
 

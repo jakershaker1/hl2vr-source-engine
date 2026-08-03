@@ -465,7 +465,12 @@ def configure(conf):
 		projects['game'] += ['togl']
 	elif conf.env.DEST_OS == 'android' and 'materialsystem/shaderapidx9' in projects['game']:
 		projects['game'].remove('materialsystem/shaderapidx9')
+		# shaderapivulkan (custom hand-rolled Vulkan backend) is superseded
+		# by shaderapidx9dxvk (real shaderapidx9 running on DXVK Native) as
+		# of Phase 2 - launcher/launcher.cpp's pDLLName picks the latter.
+		# Still built here as a reference/fallback until Phase 3 deletes it.
 		projects['game'].append('materialsystem/shaderapivulkan')
+		projects['game'].append('materialsystem/shaderapidx9dxvk')
 	elif conf.env.DEST_OS != 'win32' and 'materialsystem/shaderapidx9' in projects['game']:
 		# No D3D9/togl(es) renderer backend selected - shaderapidx9 is D3D9-only
 		# and won't compile. Use the no-op stub until a real backend (Vulkan) exists.
@@ -661,6 +666,7 @@ def build(bld):
 		elif bld.env.DEST_OS == 'android' and 'materialsystem/shaderapidx9' in projects['game']:
 			projects['game'].remove('materialsystem/shaderapidx9')
 			projects['game'].append('materialsystem/shaderapivulkan')
+			projects['game'].append('materialsystem/shaderapidx9dxvk')
 		elif bld.env.DEST_OS != 'win32' and 'materialsystem/shaderapidx9' in projects['game']:
 			projects['game'].remove('materialsystem/shaderapidx9')
 			projects['game'].append('materialsystem/shaderapiempty')

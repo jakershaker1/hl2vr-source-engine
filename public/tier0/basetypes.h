@@ -147,7 +147,9 @@ typedef int BOOL;
 #endif
 
 typedef int qboolean;
+#ifndef DXVK_NATIVE // DXVK's own portable windows.h already provides a compatible (32-bit) ULONG
 typedef unsigned long ULONG;
+#endif
 typedef unsigned char BYTE;
 typedef unsigned char byte;
 typedef unsigned short word;
