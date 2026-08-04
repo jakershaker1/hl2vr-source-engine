@@ -157,7 +157,11 @@ bool CShaderDeviceMgrDx8::Connect( CreateInterfaceFn factory )
 	// later (e.g. into the DXVK_NATIVE block further down) left SDL2's video
 	// subsystem uninitialized when DXVK's WSI code first touched it, causing
 	// a native crash inside SDL2 well before any of our own diagnostics ran.
-	DXVK_GetOrCreateWindow();
+	{
+		VD3DHWND hEarlyWnd = DXVK_GetOrCreateWindow();
+		Warning( "CShaderDeviceMgrDx8::Connect: early DXVK_GetOrCreateWindow returned %p (env HL2VR_ANATIVE_WINDOW=%s)\n",
+			(void*)hEarlyWnd, getenv( "HL2VR_ANATIVE_WINDOW" ) ? getenv( "HL2VR_ANATIVE_WINDOW" ) : "(unset)" );
+	}
 #endif
 
 #if defined ( DX_TO_GL_ABSTRACTION )

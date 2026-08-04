@@ -13002,7 +13002,17 @@ void CShaderAPIDx8::SetPixelShaderFogParams( int reg, ShaderFogMode_t fogMode )
 
 void CShaderAPIDx8::SetPixelShaderFogParams( int reg )
 {
-	SetPixelShaderFogParams( reg, m_TransitionTable.CurrentShadowState()->m_FogMode );
+	// CurrentShadowState() is null until the first shadow state is ever
+	// committed (m_CurrentShadowId == -1) - confirmed reachable on Android,
+	// where DXVK's async command-stream thread combined with this module's
+	// eager (Connect()-time) device creation apparently lets this get
+	// called before that first commit happens, unlike the normal Windows
+	// call ordering this code otherwise assumes.
+	const ShadowState_t *pShadowState = m_TransitionTable.CurrentShadowState();
+	if ( !pShadowState )
+		return;
+
+	SetPixelShaderFogParams( reg, pShadowState->m_FogMode );
 }
 
 void CShaderAPIDx8::SetFlashlightState( const FlashlightState_t &state, const VMatrix &worldToTexture )

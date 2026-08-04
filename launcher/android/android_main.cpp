@@ -20,6 +20,7 @@
 //===========================================================================//
 
 #include <android/log.h>
+#include <android/native_window.h>
 #include <android_native_app_glue.h>
 #include <inttypes.h>
 #include <jni.h>
@@ -37,6 +38,7 @@ namespace
 	struct android_app *g_pAndroidApp;
 	pthread_t g_engineThread;
 	bool g_bEngineStarted;
+	ANativeWindow *g_pAcquiredWindow;
 
 	void *EngineThreadEntry( void * )
 	{
@@ -86,6 +88,32 @@ namespace
 		switch ( cmd )
 		{
 		case APP_CMD_INIT_WINDOW:
+			if ( app->window != NULL )
+			{
+				// android_native_app_glue hands out app->window as a raw,
+				// unowned pointer - nothing stops Android's own window
+				// management from releasing the underlying ANativeWindow
+				// (an android::RefBase-derived object) once its refcount
+				// drops. Confirmed on-device: DXVK's real Vulkan surface
+				// creation crashed inside the system Vulkan driver's
+				// incStrong() on this exact pointer, even though the value
+				// itself never changed run to run - a use-after-free, not a
+				// stale/recreated-window issue. ANativeWindow_acquire()
+				// takes a real strong reference so the object stays valid
+				// for as long as DXVK (or anything else) might use it.
+				if ( g_pAcquiredWindow != app->window )
+				{
+					if ( g_pAcquiredWindow )
+						ANativeWindow_release( g_pAcquiredWindow );
+					ANativeWindow_acquire( app->window );
+					g_pAcquiredWindow = app->window;
+				}
+
+				char nativeWindowHex[32];
+				snprintf( nativeWindowHex, sizeof( nativeWindowHex ), "%llx", (unsigned long long)(uintptr_t)app->window );
+				setenv( "HL2VR_ANATIVE_WINDOW", nativeWindowHex, 1 );
+			}
+
 			if ( app->window != NULL && !g_bEngineStarted )
 			{
 				g_bEngineStarted = true;
@@ -120,16 +148,13 @@ namespace
 				// anyway (see dxvk_xr_bridge.cpp).
 				setenv( "DXVK_WSI_DRIVER", "Headless", 1 );
 
-				// VK_EXT_headless_surface isn't supported by this device's
-				// Vulkan driver (confirmed on-device), so the "Headless" WSI
-				// driver actually uses VK_KHR_android_surface (which is
-				// supported) against this app's real ANativeWindow instead -
-				// safe to share since our own OpenXR/Vulkan rendering
+				// (VK_EXT_headless_surface isn't supported by this device's
+				// Vulkan driver - the "Headless" WSI driver actually uses
+				// VK_KHR_android_surface against this app's real
+				// ANativeWindow instead, set via HL2VR_ANATIVE_WINDOW above.
+				// Safe to share since our own OpenXR/Vulkan rendering
 				// (vr_xr_vulkan.cpp) never touches the raw 2D window, only
-				// OpenXR's own swapchain.
-				char nativeWindowHex[32];
-				snprintf( nativeWindowHex, sizeof( nativeWindowHex ), "%llx", (unsigned long long)(uintptr_t)app->window );
-				setenv( "HL2VR_ANATIVE_WINDOW", nativeWindowHex, 1 );
+				// OpenXR's own swapchain.)
 
 				SetAppLibPathEnv( app );
 				pthread_create( &g_engineThread, NULL, EngineThreadEntry, NULL );

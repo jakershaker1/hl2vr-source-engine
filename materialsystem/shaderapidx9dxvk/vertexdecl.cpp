@@ -540,8 +540,13 @@ IDirect3DVertexDeclaration9 *FindOrCreateVertexDecl( VertexFormat_t fmt, bool bS
 	D3DVERTEXELEMENT9 decl[32];
 	ComputeVertexSpec( fmt, decl, bStaticLit, bUsingFlex, bUsingMorph );
 
-	HRESULT hr = 
+	Warning( "FindOrCreateVertexDecl: about to create, fmt=0x%llX decl[0].Stream=%d decl buffer=%p\n",
+		(unsigned long long)fmt, (int)decl[0].Stream, (void*)decl );
+
+	HRESULT hr =
 		Dx9Device()->CreateVertexDeclaration( decl, &lookup.m_pDecl );
+
+	Warning( "FindOrCreateVertexDecl: created m_pDecl=%p hr=0x%x\n", (void*)lookup.m_pDecl, (unsigned int)hr );
 
 	// NOTE: can't record until we have m_pDecl!
 	RECORD_COMMAND( DX8_CREATE_VERTEX_DECLARATION, 2 );
