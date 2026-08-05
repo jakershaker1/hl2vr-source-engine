@@ -32,6 +32,9 @@
 #ifdef OSX
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
+#elif defined(__ANDROID__)
+#include <GLES3/gl32.h>
+#include <GLES3/gl3ext.h>
 #elif defined(DX_TO_GL_ABSTRACTION)
 #include <GL/gl.h>
 #include <GL/glext.h>

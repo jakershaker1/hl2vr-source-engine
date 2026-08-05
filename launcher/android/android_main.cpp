@@ -16,20 +16,66 @@
 //===========================================================================//
 
 #include <android/log.h>
+#include <android/native_window.h>
 #include <android_native_app_glue.h>
+#include <jni.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 #include "openxr_bootstrap.h"
+#include "vr_xr_gles.h"
+#include "appframework/ilaunchermgr.h"
 
 extern "C" int LauncherMainAndroid( int argc, char **argv ); // launcher/android/main.cpp
+extern ILauncherMgr *g_pLauncherMgr; // appframework/sdlmgr.cpp
 
 namespace
 {
 	struct android_app *g_pAndroidApp;
 	pthread_t g_engineThread;
 	bool g_bEngineStarted;
+	ANativeWindow *g_pAcquiredWindow;
+	XrInstance g_xrInstance = XR_NULL_HANDLE;
+	XrSystemId g_xrSystemId = XR_NULL_SYSTEM_ID;
+	bool g_bVrSessionReady;
+
+	// Tier1's module loader (tier1/interface.cpp Sys_LoadModule) resolves engine
+	// .so's like filesystem_stdio.so via stat() against $APP_LIB_PATH, not via
+	// the dynamic linker's own search path. ANativeActivity doesn't expose the
+	// APK's native library directory directly, so fetch it from
+	// ApplicationInfo.nativeLibraryDir over JNI.
+	bool SetAppLibPathEnv( struct android_app *app )
+	{
+		JNIEnv *env = NULL;
+		if ( app->activity->vm->AttachCurrentThread( &env, NULL ) != JNI_OK || env == NULL )
+			return false;
+
+		bool ok = false;
+		jclass activityClass = env->GetObjectClass( app->activity->clazz );
+		jmethodID getApplicationInfo = env->GetMethodID( activityClass, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;" );
+		jobject appInfo = env->CallObjectMethod( app->activity->clazz, getApplicationInfo );
+		if ( appInfo != NULL )
+		{
+			jclass appInfoClass = env->GetObjectClass( appInfo );
+			jfieldID nativeLibraryDirField = env->GetFieldID( appInfoClass, "nativeLibraryDir", "Ljava/lang/String;" );
+			jstring nativeLibraryDir = (jstring)env->GetObjectField( appInfo, nativeLibraryDirField );
+			if ( nativeLibraryDir != NULL )
+			{
+				const char *path = env->GetStringUTFChars( nativeLibraryDir, NULL );
+				setenv( "APP_LIB_PATH", path, 1 );
+				__android_log_print( ANDROID_LOG_INFO, "hl2vr", "APP_LIB_PATH=%s", path );
+				env->ReleaseStringUTFChars( nativeLibraryDir, path );
+				ok = true;
+			}
+		}
+
+		if ( env->ExceptionCheck() )
+			env->ExceptionClear();
+
+		app->activity->vm->DetachCurrentThread();
+		return ok;
+	}
 
 	void *EngineThreadMain( void * )
 	{
@@ -42,6 +88,29 @@ namespace
 		switch ( cmd )
 		{
 		case APP_CMD_INIT_WINDOW:
+			if ( app->window != NULL )
+			{
+				// android_native_app_glue hands out app->window as a raw,
+				// unowned pointer - nothing stops Android's own window
+				// management from releasing the underlying ANativeWindow
+				// (an android::RefBase-derived object) once its refcount
+				// drops, even though the pointer value itself doesn't
+				// change. ANativeWindow_acquire() takes a real strong
+				// reference so the object stays valid for as long as the
+				// renderer (or anything else) might use it.
+				if ( g_pAcquiredWindow != app->window )
+				{
+					if ( g_pAcquiredWindow )
+						ANativeWindow_release( g_pAcquiredWindow );
+					ANativeWindow_acquire( app->window );
+					g_pAcquiredWindow = app->window;
+				}
+
+				char nativeWindowHex[32];
+				snprintf( nativeWindowHex, sizeof( nativeWindowHex ), "%llx", (unsigned long long)(uintptr_t)app->window );
+				setenv( "HL2VR_ANATIVE_WINDOW", nativeWindowHex, 1 );
+			}
+
 			// The native window is ready. Start the engine on its own thread so
 			// this thread can keep pumping the Android event loop - the engine's
 			// main loop isn't written to interleave with ALooper polling.
@@ -49,6 +118,18 @@ namespace
 			{
 				g_bEngineStarted = true;
 				setenv( "APP_DATA_PATH", app->activity->internalDataPath, 1 );
+				// GetBaseDirectory() (launcher.cpp) reads this, not APP_DATA_PATH.
+				// Game content lives under the app's external storage (internal
+				// storage is too small and raw POSIX I/O can't reach /sdcard
+				// directly under scoped storage) - already pushed there in an
+				// earlier session and still present on this device.
+				{
+					char gamePath[512];
+					snprintf( gamePath, sizeof( gamePath ), "%s/hl2vr_content", app->activity->externalDataPath );
+					setenv( "VALVE_GAME_PATH", gamePath, 1 );
+					__android_log_print( ANDROID_LOG_INFO, "hl2vr", "VALVE_GAME_PATH=%s", gamePath );
+				}
+				SetAppLibPathEnv( app );
 				pthread_create( &g_engineThread, NULL, EngineThreadMain, NULL );
 			}
 			break;
@@ -77,16 +158,21 @@ void android_main( struct android_app *app )
 	app->onAppCmd = HandleAppCmd;
 	app->onInputEvent = HandleInputEvent;
 
-	// Loader init / instance / system query only - no session yet (needs a
-	// Vulkan device, see task #6/#7). Doesn't require a native window.
-	InitOpenXR( app );
+	// Loader init / instance / system query. Doesn't require a native
+	// window - the session (which does) is created lazily below, once the
+	// engine thread has brought up its EGL context (see g_bVrSessionReady).
+	InitOpenXR( app, &g_xrInstance, &g_xrSystemId );
 
 	while ( true )
 	{
 		int events;
 		struct android_poll_source *source;
 
-		int timeoutMs = g_bEngineStarted ? -1 : 0;
+		// Keep polling (rather than blocking indefinitely) until the VR
+		// session is up, so the g_pLauncherMgr/EGL-ready check below actually
+		// gets a chance to run promptly instead of waiting on the next
+		// incidental Android system event.
+		int timeoutMs = ( g_bEngineStarted && g_bVrSessionReady ) ? -1 : ( g_bEngineStarted ? 50 : 0 );
 		while ( ALooper_pollOnce( timeoutMs, NULL, &events, (void **)&source ) >= 0 )
 		{
 			if ( source != NULL )
@@ -94,6 +180,18 @@ void android_main( struct android_app *app )
 
 			if ( app->destroyRequested != 0 )
 				return;
+		}
+
+		// CSDLMgr (appframework/sdlmgr.cpp) creates its EGL context lazily,
+		// on the engine thread, the first time materialsystem connects -
+		// not necessarily by the time this loop starts. Poll for it instead
+		// of trying to synchronize the two threads directly.
+		if ( g_xrInstance != XR_NULL_HANDLE && !g_bVrSessionReady && g_pLauncherMgr != NULL
+			&& g_pLauncherMgr->GetEglDisplay() != NULL )
+		{
+			g_bVrSessionReady = VRXR_Init( g_xrInstance, g_xrSystemId );
+			if ( !g_bVrSessionReady )
+				g_xrInstance = XR_NULL_HANDLE; // don't keep retrying a session that failed to build
 		}
 	}
 }

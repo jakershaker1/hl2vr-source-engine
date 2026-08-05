@@ -11,6 +11,8 @@
 #include "tier1/strtools.h"
 
 #define XR_USE_PLATFORM_ANDROID
+#define XR_USE_GRAPHICS_API_OPENGL_ES
+#include <EGL/egl.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
@@ -29,7 +31,7 @@ namespace
 	}
 }
 
-bool InitOpenXR( struct android_app *app )
+bool InitOpenXR( struct android_app *app, XrInstance *pInstance, XrSystemId *pSystemId )
 {
 	// The Android loader needs to be handed the JavaVM/Context before any
 	// other OpenXR call - it uses this to find and bind the runtime's
@@ -50,7 +52,7 @@ bool InitOpenXR( struct android_app *app )
 	if ( !XrCheck( xrInitializeLoaderKHR( (XrLoaderInitInfoBaseHeaderKHR *)&loaderInitInfo ), "xrInitializeLoaderKHR" ) )
 		return false;
 
-	const char *enabledExtensions[] = { XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME };
+	const char *enabledExtensions[] = { XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME, XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME };
 
 	XrInstanceCreateInfoAndroidKHR androidCreateInfo = { XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR };
 	androidCreateInfo.applicationVM = app->activity->vm;
@@ -58,7 +60,7 @@ bool InitOpenXR( struct android_app *app )
 
 	XrInstanceCreateInfo createInfo = { XR_TYPE_INSTANCE_CREATE_INFO };
 	createInfo.next = &androidCreateInfo;
-	createInfo.enabledExtensionCount = 1;
+	createInfo.enabledExtensionCount = 2;
 	createInfo.enabledExtensionNames = enabledExtensions;
 	V_strncpy( createInfo.applicationInfo.applicationName, "HL2VR", sizeof( createInfo.applicationInfo.applicationName ) );
 	createInfo.applicationInfo.applicationVersion = 1;
@@ -95,9 +97,7 @@ bool InitOpenXR( struct android_app *app )
 			systemProps.trackingProperties.orientationTracking, systemProps.trackingProperties.positionTracking );
 	}
 
-	// No graphics binding yet, so no session - just tear the instance back
-	// down. Real session creation happens once there's a Vulkan device to
-	// hand OpenXR (task #6/#7).
-	xrDestroyInstance( instance );
+	*pInstance = instance;
+	*pSystemId = systemId;
 	return true;
 }

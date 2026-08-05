@@ -17,8 +17,13 @@
 
 #if defined( DX_TO_GL_ABSTRACTION )
 
+#ifdef TOGLES
+#include "togles/linuxwin/glmgrbasics.h"
+#include "togles/linuxwin/glmdisplay.h"
+#else
 #include "togl/linuxwin/glmgrbasics.h"
 #include "togl/linuxwin/glmdisplay.h"
+#endif
 
 class GLMDisplayDB;
 class CShowPixelsParams;
@@ -84,6 +89,15 @@ public:
 	virtual GLMDisplayDB *GetDisplayDB( void ) = 0;
 	virtual void GetDesiredPixelFormatAttribsAndRendererInfo( uint **ptrOut, uint *countOut, GLMRendererInfoFields *rendInfoOut ) = 0;
 	virtual void ShowPixels( CShowPixelsParams *params ) = 0;
+#endif
+
+#if defined( __ANDROID__ )
+	// Raw EGL objects backing GetMainContext() above - needed to bind an
+	// OpenXR session to the exact same display/config/context togles is
+	// already rendering with (XrGraphicsBindingOpenGLESAndroidKHR requires
+	// this, it can't create its own).
+	virtual void *GetEglDisplay() = 0;
+	virtual void *GetEglConfig() = 0;
 #endif
 
 	virtual void GetStackCrawl( CStackCrawlParams *params ) = 0;	

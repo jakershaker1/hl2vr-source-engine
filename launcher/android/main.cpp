@@ -71,6 +71,16 @@ void SetLauncherArgs()
 	D("-nosteam");
 	D("-insecure");
 
+	// Keep the engine's dormant VR HUD-overlay/distortion-compositing paths
+	// (client_virtualreality.cpp) out of the picture for now - our
+	// ISourceVirtualReality::CompositeHud (vr_sourcevr_xr.cpp) always
+	// returns false since it's a no-op, and DoDistortionProcessing() no-ops
+	// too (the OpenXR runtime's own compositor already handles lens
+	// distortion). Untested combination otherwise; revisit once real VR
+	// HUD rendering is wired up.
+	A("+vr_hud_never_overlay", "1");
+	A("+vr_render_hud_in_world", "0");
+
 #undef A
 #undef D
 }

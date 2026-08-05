@@ -1160,6 +1160,9 @@ typedef struct tagRGBQUAD {
 #define BI_RLE4       2L
 #define BI_BITFIELDS  3L
 
+#ifndef DX_TO_GL_ABSTRACTION
+// togl(es)'s dxabstract_types.h already typedefs _GUID/GUID/UUID identically -
+// defining it again here collides when both headers land in the same TU.
 typedef struct _GUID
 {
     unsigned long Data1;
@@ -1169,6 +1172,7 @@ typedef struct _GUID
 } GUID;
 
 typedef GUID UUID;
+#endif
 
 #endif //WIN32
 //-----------------------------------------------------------------------------

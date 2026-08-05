@@ -25,8 +25,13 @@
 // DX9AsmToGL2.cpp
 //------------------------------------------------------------------------------
 // Immediately include gl.h, etc. here to avoid compilation warnings.
+#if defined(__ANDROID__)
+#include <GLES3/gl32.h>
+#include <GLES3/gl3ext.h>
+#else
 #include <GL/gl.h>
 #include <GL/glext.h>
+#endif
 
 #include "togles/rendermechanism.h"
 #include "tier0/dbg.h"

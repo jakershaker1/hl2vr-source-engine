@@ -29,8 +29,16 @@
 
 #undef PROTECTED_THINGS_ENABLE
 
+#if defined(__ANDROID__)
+#include <GLES3/gl32.h>
+#include <GLES3/gl3ext.h>
+#ifndef APIENTRY
+#define APIENTRY GL_APIENTRY
+#endif
+#else
 #include <GL/gl.h>
 #include <GL/glext.h>
+#endif
 
 #include "tier0/basetypes.h"
 #include "tier0/platform.h"

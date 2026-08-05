@@ -23,6 +23,11 @@
 #include <EGL/egl.h>
 #endif
 
+#if defined( __ANDROID__ )
+#include <android/native_window.h>
+#include <android/log.h>
+#endif
+
 // NOTE: This has to be the last file included! (turned off below, since this is included like a header)
 #include "tier0/memdbgon.h"
 
@@ -57,6 +62,15 @@ ConVar sdl_double_click_time( "sdl_double_click_time", "400" );
 COpenGLEntryPoints *gGL = NULL;
 #endif
 
+#if defined( __ANDROID__ )
+// Set by launcher/android/vr_xr_gles.cpp once its OpenXR session is ready.
+// Indirection (rather than a direct call) so this file - and every other
+// consumer of the appframework static lib, e.g. video_services, which
+// doesn't otherwise need OpenXR at all - keeps linking standalone; only
+// launcher (which compiles vr_xr_gles.cpp directly) ever actually sets it.
+void (*g_pfnHL2VR_PresentFrame)( unsigned int glTexture, int width, int height ) = NULL;
+#endif
+
 const int kBogusSwapInterval = INT_MAX;
 
 #if defined ANDROID || defined TOGLES
@@ -75,6 +89,52 @@ t_glGetProcAddress _glGetProcAddress;
 t_eglInitialize _eglInitialize;
 t_eglGetDisplay _eglGetDisplay;
 t_eglQueryString _eglQueryString;
+#endif
+
+#if defined( __ANDROID__ )
+// Extra EGL entry points needed to drive EGL directly against the real
+// ANativeWindow (SDL's Android video backend isn't usable - see m_pANativeWindow).
+typedef EGLBoolean (*t_eglChooseConfig)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
+typedef EGLSurface (*t_eglCreateWindowSurface)(EGLDisplay, EGLConfig, NativeWindowType, const EGLint *);
+typedef EGLSurface (*t_eglCreatePbufferSurface)(EGLDisplay, EGLConfig, const EGLint *);
+typedef EGLContext (*t_eglCreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
+typedef EGLBoolean (*t_eglMakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+typedef EGLBoolean (*t_eglSwapBuffers)(EGLDisplay, EGLSurface);
+typedef EGLBoolean (*t_eglSwapInterval)(EGLDisplay, EGLint);
+typedef EGLBoolean (*t_eglDestroySurface)(EGLDisplay, EGLSurface);
+typedef EGLBoolean (*t_eglDestroyContext)(EGLDisplay, EGLContext);
+typedef EGLBoolean (*t_eglTerminate)(EGLDisplay);
+typedef EGLBoolean (*t_eglQuerySurface)(EGLDisplay, EGLSurface, EGLint, EGLint *);
+typedef EGLBoolean (*t_eglGetConfigAttrib)(EGLDisplay, EGLConfig, EGLint, EGLint *);
+
+static t_eglChooseConfig _eglChooseConfig;
+static t_eglCreateWindowSurface _eglCreateWindowSurface;
+static t_eglCreatePbufferSurface _eglCreatePbufferSurface;
+static t_eglCreateContext _eglCreateContext;
+static t_eglMakeCurrent _eglMakeCurrent;
+static t_eglSwapBuffers _eglSwapBuffers;
+static t_eglSwapInterval _eglSwapInterval;
+static t_eglDestroySurface _eglDestroySurface;
+static t_eglDestroyContext _eglDestroyContext;
+static t_eglTerminate _eglTerminate;
+static t_eglQuerySurface _eglQuerySurface;
+static t_eglGetConfigAttrib _eglGetConfigAttrib;
+
+static void LoadExtraEglEntryPoints()
+{
+	_eglChooseConfig = (t_eglChooseConfig)dlsym(l_egl, "eglChooseConfig");
+	_eglCreateWindowSurface = (t_eglCreateWindowSurface)dlsym(l_egl, "eglCreateWindowSurface");
+	_eglCreatePbufferSurface = (t_eglCreatePbufferSurface)dlsym(l_egl, "eglCreatePbufferSurface");
+	_eglCreateContext = (t_eglCreateContext)dlsym(l_egl, "eglCreateContext");
+	_eglMakeCurrent = (t_eglMakeCurrent)dlsym(l_egl, "eglMakeCurrent");
+	_eglSwapBuffers = (t_eglSwapBuffers)dlsym(l_egl, "eglSwapBuffers");
+	_eglSwapInterval = (t_eglSwapInterval)dlsym(l_egl, "eglSwapInterval");
+	_eglDestroySurface = (t_eglDestroySurface)dlsym(l_egl, "eglDestroySurface");
+	_eglDestroyContext = (t_eglDestroyContext)dlsym(l_egl, "eglDestroyContext");
+	_eglTerminate = (t_eglTerminate)dlsym(l_egl, "eglTerminate");
+	_eglQuerySurface = (t_eglQuerySurface)dlsym(l_egl, "eglQuerySurface");
+	_eglGetConfigAttrib = (t_eglGetConfigAttrib)dlsym(l_egl, "eglGetConfigAttrib");
+}
 #endif
 
 /*
@@ -299,13 +359,22 @@ public:
 
 	virtual PseudoGLContextPtr	GetMainContext();
 	// Get the NSGLContext for a window's main view - note this is the carbon windowref as an argument
+#if defined( __ANDROID__ )
+	virtual PseudoGLContextPtr GetGLContextForWindow( void* windowref ) { return (PseudoGLContextPtr)m_eglContext; }
+#else
 	virtual PseudoGLContextPtr GetGLContextForWindow( void* windowref ) { return (PseudoGLContextPtr)m_GLContext; }
+#endif
 	virtual PseudoGLContextPtr CreateExtraContext();
 	virtual void DeleteContext( PseudoGLContextPtr hContext );
 	virtual bool MakeContextCurrent( PseudoGLContextPtr hContext );
 	virtual GLMDisplayDB *GetDisplayDB( void );
 
 	virtual void ShowPixels( CShowPixelsParams *params );
+
+#if defined( __ANDROID__ )
+	virtual void *GetEglDisplay() { return (void *)m_eglDisplay; }
+	virtual void *GetEglConfig() { return (void *)m_eglConfig; }
+#endif
 #endif
 
 	virtual void GetStackCrawl( CStackCrawlParams *params );
@@ -336,10 +405,41 @@ public:
 private:
 	void handleKeyInput( const SDL_Event &event );
 
+#if defined( __ANDROID__ )
+	void PlatformSwapBuffers()
+	{
+		// Swaps the real window surface, which is what makes our content
+		// visible in Android XR's Home Space preview (see CreateHiddenGameWindow).
+		// Real full-space presentation still happens separately via
+		// g_pfnHL2VR_PresentFrame (called from ShowPixels() before this).
+		_eglSwapBuffers( m_eglDisplay, m_eglSurface );
+	}
+	void PlatformGetWindowSize( int &w, int &h )
+	{
+		w = m_pANativeWindow ? ANativeWindow_getWidth( m_pANativeWindow ) : 0;
+		h = m_pANativeWindow ? ANativeWindow_getHeight( m_pANativeWindow ) : 0;
+	}
+#else
+	void PlatformSwapBuffers() { SDL_GL_SwapWindow( m_Window ); }
+	void PlatformGetWindowSize( int &w, int &h ) { SDL_GetWindowSize( m_Window, &w, &h ); }
+#endif
+
 #if defined( DX_TO_GL_ABSTRACTION )
 	SDL_GLContext m_GLContext;
 	GLuint m_readFBO;
 	GLMDisplayDB *m_displayDB;
+#endif
+
+#if defined( __ANDROID__ )
+	// SDL's Android video backend needs the Java SDLActivity JNI bootstrap,
+	// which this app (a plain NativeActivity) never performs - so on Android
+	// we drive EGL directly against the real ANativeWindow instead of going
+	// through SDL_CreateWindow/SDL_GL_CreateContext/SDL_GL_SwapWindow.
+	struct ANativeWindow *m_pANativeWindow;
+	EGLDisplay m_eglDisplay;
+	EGLSurface m_eglSurface;
+	EGLContext m_eglContext;
+	EGLConfig m_eglConfig;
 #endif
 
 #if defined( OSX )
@@ -513,6 +613,11 @@ InitReturnVal_t CSDLMgr::Init()
 	if (m_Window != NULL)
 		return INIT_OK;  // already initialized.
 
+#if !defined( __ANDROID__ )
+	// On Android we skip SDL's own video subsystem entirely - SDL_Init(SDL_INIT_VIDEO)
+	// needs the Java SDLActivity JNI bootstrap this NativeActivity-based app never
+	// performs. We dlopen libEGL.so/libGLESv3.so ourselves below instead of via
+	// SDL_GL_LoadLibrary.
 	if (!SDL_WasInit(SDL_INIT_VIDEO))
 	{
 		if (SDL_Init(SDL_INIT_VIDEO) == -1)
@@ -532,9 +637,12 @@ InitReturnVal_t CSDLMgr::Init()
 			Error( "SDL_GL_LoadLibrary(NULL) failed: %s", SDL_GetError() );
 #endif
 	}
+#endif // !__ANDROID__
 
+#if !defined( __ANDROID__ )
 	fprintf(stderr, "SDL video target is '%s'\n", SDL_GetCurrentVideoDriver());
 	Msg("SDL video target is '%s'\n", SDL_GetCurrentVideoDriver());
+#endif
 
 	m_bForbidMouseGrab = true;
 	if ( !CommandLine()->FindParm("-nomousegrab") && CommandLine()->FindParm("-mousegrab") )
@@ -557,6 +665,13 @@ InitReturnVal_t CSDLMgr::Init()
 	m_GLContext = NULL;
 	m_readFBO = 0;
 	m_displayDB = NULL;
+#endif
+#if defined( __ANDROID__ )
+	m_pANativeWindow = NULL;
+	m_eglDisplay = EGL_NO_DISPLAY;
+	m_eglSurface = EGL_NO_SURFACE;
+	m_eglContext = EGL_NO_CONTEXT;
+	m_eglConfig = NULL;
 #endif
 	m_nWindowRefCount = 0;
 	m_Window = NULL;
@@ -608,6 +723,9 @@ InitReturnVal_t CSDLMgr::Init()
 	if( l_egl )
 	{
 		_glGetProcAddress = (t_glGetProcAddress)dlsym(l_egl, "eglGetProcAddress");
+#if defined( __ANDROID__ )
+		LoadExtraEglEntryPoints();
+#endif
 	}
 
 	SET_GL_ATTR(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -679,7 +797,9 @@ InitReturnVal_t CSDLMgr::Init()
 	if ( !CreateHiddenGameWindow( "", 1280, 720 ) )
 		Error( "CreateGameWindow failed" );
 
+#if !defined( __ANDROID__ )
 	SDL_HideWindow( m_Window );
+#endif
 
 	return INIT_OK;
 }
@@ -724,8 +844,10 @@ void CSDLMgr::Shutdown()
 		DestroyGameWindow();
 	}
 
+#if !defined( __ANDROID__ )
 	SDL_GL_UnloadLibrary();
 	SDL_QuitSubSystem(SDL_INIT_VIDEO);
+#endif
 }
 
 bool CSDLMgr::CreateGameWindow( const char *pTitle, bool bWindowed, int width, int height )
@@ -759,6 +881,11 @@ bool CSDLMgr::CreateGameWindow( const char *pTitle, bool bWindowed, int width, i
 
 	if ( m_Window )
 	{
+#if defined( __ANDROID__ )
+		// Fixed-geometry VR swapchain - no window chrome/resize/refocus to do.
+		m_WindowShownAndRaised = true;
+		return true;
+#else
 		if ( pTitle )
 		{
 			SDL_SetWindowTitle( m_Window, pTitle );
@@ -783,11 +910,14 @@ bool CSDLMgr::CreateGameWindow( const char *pTitle, bool bWindowed, int width, i
 		}
 
 		return true;
+#endif
 	}
 
 	if ( CreateHiddenGameWindow( pTitle, width, height ) )
 	{
+#if !defined( __ANDROID__ )
 		SDL_ShowWindow( m_Window );
+#endif
 		return true;
 	}
 	else
@@ -804,15 +934,82 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 	m_bFullScreen = false;
 	sdl_displayindex_fullscreen.SetValue( -1 );
 
+	// no window yet? Create one now!
+	m_nWindowRefCount = 1;
+
+#if defined( __ANDROID__ )
+	// SDL_CreateWindow needs SDL's Android video backend, which needs the
+	// Java SDLActivity JNI bootstrap this NativeActivity-based app never
+	// performs (same reason DXVK's WSI needed a custom Android driver
+	// instead of SDL2). Drive EGL directly against the real ANativeWindow
+	// instead - handed over via the HL2VR_ANATIVE_WINDOW env var, same
+	// convention android_main.cpp already uses for the Vulkan path.
+	const char *pWindowHex = getenv( "HL2VR_ANATIVE_WINDOW" );
+	if ( !pWindowHex )
+		Error( "CSDLMgr::CreateHiddenGameWindow: HL2VR_ANATIVE_WINDOW not set - no native window yet" );
+	m_pANativeWindow = (struct ANativeWindow *)(uintptr_t)strtoull( pWindowHex, NULL, 16 );
+
+	m_eglDisplay = _eglGetDisplay( EGL_DEFAULT_DISPLAY );
+	if ( m_eglDisplay == EGL_NO_DISPLAY || !_eglInitialize( m_eglDisplay, NULL, NULL ) )
+		Error( "CSDLMgr::CreateHiddenGameWindow: eglGetDisplay/eglInitialize failed" );
+
+	// A real window surface bound to the Activity's own ANativeWindow.
+	// Three EGL surface configurations have now been tried: pbuffer,
+	// surfaceless (matching Khronos's hello_xr reference sample exactly -
+	// see org.khronos.openxr.hello_xr.opengles on-device), and this one.
+	// None of the three changed Full Space promotion (still confined to
+	// Home Space in all three) - so surface configuration is not the
+	// blocker; ruled out. Surfaceless is measurably worse though: with no
+	// buffer ever posted to the real ANativeWindow, the system has nothing
+	// to show for the Home Space preview at all (confirmed via device
+	// screenshot - just the system home environment + loading spinner, our
+	// content never appears anywhere, vs. real rendered content behind the
+	// spinner with a window surface). Reverting to this - real content in
+	// Home Space - as the known-good baseline while Full Space promotion
+	// itself needs investigation elsewhere (not EGL surface management).
+	const EGLint configAttribs[] = {
+		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+		EGL_RED_SIZE, 8,
+		EGL_GREEN_SIZE, 8,
+		EGL_BLUE_SIZE, 8,
+		EGL_ALPHA_SIZE, 8,
+		EGL_DEPTH_SIZE, 24,
+		EGL_STENCIL_SIZE, 8,
+		EGL_NONE
+	};
+	EGLint numConfigs = 0;
+	if ( !_eglChooseConfig( m_eglDisplay, configAttribs, &m_eglConfig, 1, &numConfigs ) || numConfigs < 1 )
+		Error( "CSDLMgr::CreateHiddenGameWindow: eglChooseConfig failed to find a matching config" );
+
+	EGLint nativeVisualId = 0;
+	_eglGetConfigAttrib( m_eglDisplay, m_eglConfig, EGL_NATIVE_VISUAL_ID, &nativeVisualId );
+	ANativeWindow_setBuffersGeometry( m_pANativeWindow, 0, 0, nativeVisualId );
+
+	m_eglSurface = _eglCreateWindowSurface( m_eglDisplay, m_eglConfig, (NativeWindowType)m_pANativeWindow, NULL );
+	if ( m_eglSurface == EGL_NO_SURFACE )
+		Error( "CSDLMgr::CreateHiddenGameWindow: eglCreateWindowSurface failed" );
+
+	const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+	m_eglContext = _eglCreateContext( m_eglDisplay, m_eglConfig, EGL_NO_CONTEXT, contextAttribs );
+	if ( m_eglContext == EGL_NO_CONTEXT )
+		Error( "CSDLMgr::CreateHiddenGameWindow: eglCreateContext failed" );
+
+	if ( !_eglMakeCurrent( m_eglDisplay, m_eglSurface, m_eglSurface, m_eglContext ) )
+		Error( "CSDLMgr::CreateHiddenGameWindow: eglMakeCurrent failed" );
+
+	// Sentinel: nothing ever dereferences m_Window on Android (every consuming
+	// call site below is patched to use m_eglDisplay/m_eglSurface/m_eglContext
+	// instead), it just needs to read as "already created" to the various
+	// (m_Window != NULL) checks elsewhere in this file.
+	m_Window = (SDL_Window *)(intptr_t)1;
+#else
 #if defined( DX_TO_GL_ABSTRACTION )
 	// Set up GL context...
 	const int *attrib = m_pixelFormatAttribs;
 	for (int i = 0; i < m_pixelFormatAttribCount; i++, attrib += 2)
 		SDL_GL_SetAttribute((SDL_GLattr) attrib[0], attrib[1]);
 #endif
-
-	// no window yet? Create one now!
-	m_nWindowRefCount = 1;
 
 	int x = SDL_WINDOWPOS_CENTERED;
 	int y = SDL_WINDOWPOS_CENTERED;
@@ -825,6 +1022,7 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 	if (m_Window == NULL)
 		Error( "Failed to create SDL window: %s", SDL_GetError() );
 	SetAssertDialogParent( m_Window );
+#endif // __ANDROID__
 
 #ifdef OSX
 
@@ -849,11 +1047,15 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 #endif
 
 #if defined( DX_TO_GL_ABSTRACTION )
+#if !defined( __ANDROID__ )
+	// On Android the context/surface were already created and made current
+	// directly against EGL above (see m_pANativeWindow).
 	m_GLContext = SDL_GL_CreateContext(m_Window);
 	if (m_GLContext == NULL)
 		Error( "Failed to create GL context: %s", SDL_GetError() );
 
 	SDL_GL_MakeCurrent(m_Window, m_GLContext);
+#endif
 
 #if defined ANDROID && !defined TOGLES
 	if( l_gl4es )
@@ -920,11 +1122,11 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 	//  video RAM trash until we start proper drawing.
 	gGL->glClearColor(0,0,0,0);
 	gGL->glClear(GL_COLOR_BUFFER_BIT);
-	SDL_GL_SwapWindow(m_Window);
+	PlatformSwapBuffers();
 	gGL->glClear(GL_COLOR_BUFFER_BIT);
-	SDL_GL_SwapWindow(m_Window);
+	PlatformSwapBuffers();
 	gGL->glClear(GL_COLOR_BUFFER_BIT);
-	SDL_GL_SwapWindow(m_Window);
+	PlatformSwapBuffers();
 #endif // DX_TO_GL_ABSTRACTION
 
 	m_WindowWidth = width;
@@ -939,6 +1141,46 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 }
 
 #if defined( DX_TO_GL_ABSTRACTION )
+
+#if defined( __ANDROID__ )
+
+PseudoGLContextPtr	CSDLMgr::GetMainContext()
+{
+	SDLAPP_FUNC;
+
+	return (PseudoGLContextPtr)m_eglContext;
+}
+
+PseudoGLContextPtr CSDLMgr::CreateExtraContext()
+{
+	SDLAPP_FUNC;
+
+	const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+	return (PseudoGLContextPtr)_eglCreateContext( m_eglDisplay, m_eglConfig, m_eglContext, contextAttribs );
+}
+
+void CSDLMgr::DeleteContext( PseudoGLContextPtr hContext )
+{
+	SDLAPP_FUNC;
+	Assert( (EGLContext)hContext != m_eglContext );
+
+	// Don't delete the main one.
+	if ( (EGLContext)hContext != m_eglContext )
+	{
+		_eglDestroyContext( m_eglDisplay, (EGLContext)hContext );
+	}
+}
+
+bool CSDLMgr::MakeContextCurrent( PseudoGLContextPtr hContext )
+{
+	SDLAPP_FUNC;
+
+	// Single window/surface on Android - every context (main or extra) draws
+	// against the same EGLSurface.
+	return _eglMakeCurrent( m_eglDisplay, m_eglSurface, m_eglSurface, (EGLContext)hContext ) == EGL_TRUE;
+}
+
+#else
 
 PseudoGLContextPtr	CSDLMgr::GetMainContext()
 {
@@ -962,7 +1204,7 @@ void CSDLMgr::DeleteContext( PseudoGLContextPtr hContext )
 {
 	SDLAPP_FUNC;
 	Assert( (SDL_GLContext)hContext != m_GLContext );
-	
+
 	// Don't delete the main one.
 	if ( (SDL_GLContext)hContext != m_GLContext )
 	{
@@ -981,6 +1223,8 @@ bool CSDLMgr::MakeContextCurrent( PseudoGLContextPtr hContext )
 	// We only ever have one GL context on Linux at the moment, so don't spam these calls.
 	return SDL_GL_MakeCurrent(m_Window, (SDL_GLContext)hContext ) == 0;
 }
+
+#endif // __ANDROID__
 
 #endif // DX_TO_GL_ABSTRACTION
 
@@ -1080,7 +1324,9 @@ void CSDLMgr::SetCursorPosition( int x, int y )
 {
 	SDLAPP_FUNC;
 
+#if !defined( __ANDROID__ )
 	SDL_WarpMouseInWindow(m_Window, x, y);
+#endif
 }
 
 void CSDLMgr::PostEvent( const CCocoaEvent &theEvent, bool debugEvent )
@@ -1131,6 +1377,13 @@ void CSDLMgr::SetMouseCursor( SDL_Cursor *hCursor )
 void CSDLMgr::OnFrameRendered()
 {
 	SDLAPP_FUNC;
+
+#if defined( __ANDROID__ )
+	// No SDL window/cursor to manage - VR headsets have no OS mouse cursor.
+	m_bSetMouseCursorCalled = false;
+	m_bSetMouseVisibleCalled = false;
+	return;
+#endif
 
 	if ( m_bCursorVisible && m_bSetMouseCursorCalled )
 	{
@@ -1186,8 +1439,18 @@ void CSDLMgr::OnFrameRendered()
 void CSDLMgr::ShowPixels( CShowPixelsParams *params )
 {
 	SDLAPP_FUNC;
-	
+
 	tmZone( TELEMETRY_LEVEL0, TMZF_NONE, __FUNCTION__ );
+
+#if defined( __ANDROID__ )
+	// Forward the completed D3D9 backbuffer into the OpenXR swapchain (see
+	// launcher/android/vr_xr_gles.cpp, which installs this hook once its
+	// session is ready). No-op until then. This app's own EGL window
+	// surface (below) is never actually shown on screen - the OpenXR
+	// compositor is what the user sees.
+	if ( g_pfnHL2VR_PresentFrame && !params->m_onlySyncView )
+		g_pfnHL2VR_PresentFrame( params->m_srcTexName, params->m_width, params->m_height );
+#endif
 
 	if (params->m_onlySyncView)
 		return;
@@ -1291,7 +1554,7 @@ void CSDLMgr::ShowPixels( CShowPixelsParams *params )
 			int dstxmax = 0;
 			int dstymax = 0;
 
-			SDL_GetWindowSize(m_Window, &dstxmax, &dstymax);
+			PlatformGetWindowSize(dstxmax, dstymax);
 
 			if (gl_blit_halfx.GetInt())
 			{
@@ -1433,7 +1696,7 @@ void CSDLMgr::ShowPixels( CShowPixelsParams *params )
 	CFastTimer tm;
 	tm.Start();
 
-	SDL_GL_SwapWindow( m_Window );
+	PlatformSwapBuffers();
 
 	m_flPrevGLSwapWindowTime = tm.GetDurationInProgress().GetMillisecondsF();
 
@@ -1460,6 +1723,10 @@ void CSDLMgr::SetWindowFullScreen( bool bFullScreen, int nWidth, int nHeight )
 {
 	SDLAPP_FUNC;
 
+#if defined( __ANDROID__ )
+	// No window manager / fullscreen concept for a VR headset.
+	return;
+#else
 	SDL_DisplayMode mode;
 	int displayIndex = sdl_displayindex.GetInt();
 
@@ -1531,6 +1798,7 @@ void CSDLMgr::SetWindowFullScreen( bool bFullScreen, int nWidth, int nHeight )
 
 		m_bFullScreen = bFullScreen;
 	}
+#endif // __ANDROID__
 }
 
 
@@ -1538,7 +1806,9 @@ void CSDLMgr::MoveWindow( int x, int y )
 {
 	SDLAPP_FUNC;
 
+#if !defined( __ANDROID__ )
 	SDL_SetWindowPosition(m_Window, x, y);
+#endif
 }
 
 void CSDLMgr::SizeWindow( int width, int tall )
@@ -1564,12 +1834,13 @@ void CSDLMgr::SizeWindow( int width, int tall )
 	m_nMouseTargetY = m_WindowHeight / 2;
 	m_nWarpDelta = Max( m_WindowHeight / 3, 200 );
 
-	SDL_SetWindowSize( m_Window, width, tall );
-
 #if defined( DX_TO_GL_ABSTRACTION )
 	gGL->glViewport(0, 0, (GLsizei) width, (GLsizei) tall);
 	gGL->glScissor( 0,0, (GLsizei) width, (GLsizei) tall );
 #endif
+
+#if !defined( __ANDROID__ )
+	SDL_SetWindowSize( m_Window, width, tall );
 
 	// If the Window hasn't been shown yet, show it now.
 	if ( !m_WindowShownAndRaised )
@@ -1583,6 +1854,9 @@ void CSDLMgr::SizeWindow( int width, int tall )
 	{
 		SDL_RaiseWindow( m_Window );
 	}
+#else
+	m_WindowShownAndRaised = true;
+#endif
 }
 
 
@@ -2013,6 +2287,28 @@ void CSDLMgr::DecWindowRefCount()
 
 	if ( !m_nWindowRefCount )
 	{
+#if defined( __ANDROID__ )
+		if ( gGL && m_readFBO )
+		{
+			gGL->glDeleteFramebuffers( 1, &m_readFBO );
+			m_readFBO = 0;
+		}
+
+		if ( m_eglDisplay != EGL_NO_DISPLAY )
+		{
+			_eglMakeCurrent( m_eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT );
+			if ( m_eglSurface != EGL_NO_SURFACE )
+				_eglDestroySurface( m_eglDisplay, m_eglSurface );
+			if ( m_eglContext != EGL_NO_CONTEXT )
+				_eglDestroyContext( m_eglDisplay, m_eglContext );
+			_eglTerminate( m_eglDisplay );
+		}
+		m_eglDisplay = EGL_NO_DISPLAY;
+		m_eglSurface = EGL_NO_SURFACE;
+		m_eglContext = EGL_NO_CONTEXT;
+		m_pANativeWindow = NULL;
+		m_Window = NULL;
+#else
 #if defined( DX_TO_GL_ABSTRACTION )
 		if ( m_Window )
 		{
@@ -2028,7 +2324,7 @@ void CSDLMgr::DecWindowRefCount()
 #endif
 		}
 		m_readFBO = 0;
-								
+
 		SDL_GL_DeleteContext( m_GLContext );
 #if !defined( OSX ) && defined( DBGFLAG_ASSERT )
 		// Clear the GL entrypoint pointers, ensuring we crash if someone tries to call GL after we delete the context.
@@ -2044,6 +2340,7 @@ void CSDLMgr::DecWindowRefCount()
 		SDL_DestroyWindow(m_Window);
 		m_Window = NULL;
 		SetAssertDialogParent( NULL );
+#endif // __ANDROID__
 	}
 }
 
@@ -2061,12 +2358,14 @@ void CSDLMgr::SetApplicationIcon( const char *pchAppIconFile )
 {
 	SDLAPP_FUNC;
 
+#if !defined( __ANDROID__ )
 	SDL_Surface *icon = SDL_LoadBMP(pchAppIconFile);
 	if (icon)
 	{
 		SDL_SetWindowIcon(m_Window, icon);
 		SDL_FreeSurface(icon);
 	}
+#endif
 }
 
 void CSDLMgr::GetMouseDelta( int &x, int &y, bool bIgnoreNextMouseDelta )
@@ -2083,6 +2382,18 @@ void CSDLMgr::GetMouseDelta( int &x, int &y, bool bIgnoreNextMouseDelta )
 //
 void CSDLMgr::GetNativeDisplayInfo( int nDisplay, uint &nWidth, uint &nHeight, uint &nRefreshHz )
 {
+#if defined( __ANDROID__ )
+	// No SDL video subsystem on Android (see m_pANativeWindow) - report the
+	// real window size if we have one yet, otherwise a placeholder the
+	// caller (CreateGameWindow, when asked for "default" size) will use
+	// until the real per-eye resolution is set explicitly.
+	int w = 0, h = 0;
+	PlatformGetWindowSize( w, h );
+	nWidth = w > 0 ? (uint)w : 1024;
+	nHeight = h > 0 ? (uint)h : 768;
+	nRefreshHz = 90;
+	return;
+#else
 	SDL_DisplayMode mode;
 
 	if ( nDisplay == -1 )
@@ -2110,6 +2421,7 @@ void CSDLMgr::GetNativeDisplayInfo( int nDisplay, uint &nWidth, uint &nHeight, u
 	nRefreshHz = mode.refresh_rate;
 	nWidth = mode.w;
 	nHeight = mode.h;
+#endif // __ANDROID__
 }
 
 
@@ -2134,7 +2446,7 @@ void CSDLMgr::DisplayedSize( uint &width, uint &height )
 	SDLAPP_FUNC;
 
 	int w, h;
-	SDL_GetWindowSize(m_Window, &w, &h);
+	PlatformGetWindowSize(w, h);
 	width = (uint) w;
 	height = (uint) h;
 }
@@ -2155,6 +2467,7 @@ void CSDLMgr::WaitUntilUserInput( int msSleepTime )
 
 void CSDLMgr::SetGammaRamp( const uint16 *pRed, const uint16 *pGreen, const uint16 *pBlue )
 {
+#if !defined( __ANDROID__ )
 	if ( m_Window )
 	{
 		int nResult = SDL_SetWindowGammaRamp( m_Window, pRed, pGreen, pBlue );
@@ -2164,6 +2477,7 @@ void CSDLMgr::SetGammaRamp( const uint16 *pRed, const uint16 *pGreen, const uint
 			ConMsg( "SDL_SetWindowGammaRamp failed: %d\n", nResult );
 		}
 	}
+#endif
 }
 
 //===============================================================================
