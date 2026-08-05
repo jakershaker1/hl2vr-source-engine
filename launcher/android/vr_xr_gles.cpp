@@ -331,29 +331,19 @@ namespace
 		XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
 		endInfo.displayTime = g_Vr.frameState.predictedDisplayTime;
 		endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-		// Submit unconditionally rather than gating on frameState.shouldRender -
-		// that's a power-saving hint, not a hard requirement (apps are allowed
-		// to submit anyway per spec), and the compositor reported our frame
-		// rate as 0 / kept us in Home Space rather than Full Space with the
-		// gated version, suggesting shouldRender was false far more than
-		// expected and we were regularly submitting zero layers.
+		// Submit unconditionally rather than gating on frameState.shouldRender.
+		// That flag is a power-saving hint, not a hard requirement - apps may
+		// submit anyway per spec. (This was originally changed while chasing
+		// the Home Space problem on the theory that we were submitting zero
+		// layers too often; that turned out not to be the cause - see
+		// PresentFrameBootstrap - but submitting unconditionally is harmless
+		// and is what's been tested on-device, so it stays.)
 		endInfo.layerCount = 1;
 		endInfo.layers = layers;
 
-		static int s_presentCount = 0;
-		static bool s_loggedShouldRenderFalse = false;
-		s_presentCount++;
-		if ( !g_Vr.frameState.shouldRender && !s_loggedShouldRenderFalse )
-		{
-			LOGI( "PresentFrame: frameState.shouldRender was false (present #%d) - submitting anyway", s_presentCount );
-			s_loggedShouldRenderFalse = true;
-		}
-		if ( ( s_presentCount % 200 ) == 0 )
-			LOGI( "PresentFrame: heartbeat, present #%d", s_presentCount );
-
 		XrResult endResult = xrEndFrame( g_Vr.session, &endInfo );
 		if ( !XR_SUCCEEDED( endResult ) )
-			LOGE( "xrEndFrame failed: XrResult %d (present #%d)", (int)endResult, s_presentCount );
+			LOGE( "xrEndFrame failed: XrResult %d", (int)endResult );
 
 		g_Vr.frameOpen = false;
 	}

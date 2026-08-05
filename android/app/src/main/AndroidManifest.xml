@@ -22,9 +22,13 @@
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
 
-    <!-- Android XR (Samsung Galaxy XR / Moohan): without this the runtime
+    <!-- Android XR. NOTE: this is protectionLevel signature|privileged, so a
+         sideloaded/debug build can never actually be granted it - the runtime
          logs "Permission failure: android.permission.XR_TRACKING_IN_BACKGROUND"
-         and the app is confined to a windowed panel instead of Full Space. -->
+         on every launch (along with HAND_TRACKING, HEAD_TRACKING,
+         EYE_TRACKING_*, SCENE_UNDERSTANDING_*, ...). That logging is normal
+         noise, not a fault: Full Space and head tracking both work fine
+         without it. Declared for the benefit of properly-signed builds. -->
     <uses-permission android:name="android.permission.XR_TRACKING_IN_BACKGROUND" />
     <queries>
         <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />

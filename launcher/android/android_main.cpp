@@ -77,10 +77,45 @@ namespace
 		return ok;
 	}
 
+	bool g_bOpenXrInitDone;
+
 	void *EngineThreadMain( void * )
 	{
 		LauncherMainAndroid( 0, NULL );
 		return NULL;
+	}
+
+	// The engine thread must not start until BOTH the native window exists and
+	// InitOpenXR() has finished publishing the per-eye render size, because
+	// SetLauncherArgs() (launcher/android/main.cpp) reads HL2VR_EYE_WIDTH/HEIGHT
+	// to build the -w/-h arguments that set the stereo backbuffer size.
+	//
+	// These two are genuinely concurrent: xrCreateInstance binds to the OpenXR
+	// runtime broker over Binder, which pumps this thread's ALooper
+	// re-entrantly, so APP_CMD_INIT_WINDOW gets dispatched *during*
+	// InitOpenXR() rather than after it. Starting the engine from the command
+	// handler therefore beat the env vars by ~1s and the engine silently fell
+	// back to a 640x480 backbuffer.
+	void StartEngineIfReady( struct android_app *app )
+	{
+		if ( g_bEngineStarted || !g_bOpenXrInitDone || app->window == NULL )
+			return;
+
+		g_bEngineStarted = true;
+		setenv( "APP_DATA_PATH", app->activity->internalDataPath, 1 );
+		// GetBaseDirectory() (launcher.cpp) reads this, not APP_DATA_PATH.
+		// Game content lives under the app's external storage (internal
+		// storage is too small and raw POSIX I/O can't reach /sdcard
+		// directly under scoped storage) - already pushed there in an
+		// earlier session and still present on this device.
+		{
+			char gamePath[512];
+			snprintf( gamePath, sizeof( gamePath ), "%s/hl2vr_content", app->activity->externalDataPath );
+			setenv( "VALVE_GAME_PATH", gamePath, 1 );
+			__android_log_print( ANDROID_LOG_INFO, "hl2vr", "VALVE_GAME_PATH=%s", gamePath );
+		}
+		SetAppLibPathEnv( app );
+		pthread_create( &g_engineThread, NULL, EngineThreadMain, NULL );
 	}
 
 	void HandleAppCmd( struct android_app *app, int32_t cmd )
@@ -111,27 +146,12 @@ namespace
 				setenv( "HL2VR_ANATIVE_WINDOW", nativeWindowHex, 1 );
 			}
 
-			// The native window is ready. Start the engine on its own thread so
-			// this thread can keep pumping the Android event loop - the engine's
+			// The native window is ready. The engine runs on its own thread so
+			// this one can keep pumping the Android event loop - the engine's
 			// main loop isn't written to interleave with ALooper polling.
-			if ( app->window != NULL && !g_bEngineStarted )
-			{
-				g_bEngineStarted = true;
-				setenv( "APP_DATA_PATH", app->activity->internalDataPath, 1 );
-				// GetBaseDirectory() (launcher.cpp) reads this, not APP_DATA_PATH.
-				// Game content lives under the app's external storage (internal
-				// storage is too small and raw POSIX I/O can't reach /sdcard
-				// directly under scoped storage) - already pushed there in an
-				// earlier session and still present on this device.
-				{
-					char gamePath[512];
-					snprintf( gamePath, sizeof( gamePath ), "%s/hl2vr_content", app->activity->externalDataPath );
-					setenv( "VALVE_GAME_PATH", gamePath, 1 );
-					__android_log_print( ANDROID_LOG_INFO, "hl2vr", "VALVE_GAME_PATH=%s", gamePath );
-				}
-				SetAppLibPathEnv( app );
-				pthread_create( &g_engineThread, NULL, EngineThreadMain, NULL );
-			}
+			// May be a no-op here if InitOpenXR() hasn't finished yet; that
+			// path starts it instead (see StartEngineIfReady).
+			StartEngineIfReady( app );
 			break;
 
 		case APP_CMD_DESTROY:
@@ -162,6 +182,12 @@ void android_main( struct android_app *app )
 	// window - the session (which does) is created lazily below, once the
 	// engine thread has brought up its EGL context (see g_bVrSessionReady).
 	InitOpenXR( app, &g_xrInstance, &g_xrSystemId );
+
+	// Only now are HL2VR_EYE_WIDTH/HEIGHT published, so the engine may start.
+	// If the window already arrived while InitOpenXR was running (it usually
+	// does - see StartEngineIfReady), this is what actually launches it.
+	g_bOpenXrInitDone = true;
+	StartEngineIfReady( app );
 
 	while ( true )
 	{

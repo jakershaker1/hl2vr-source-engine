@@ -71,6 +71,11 @@ void SetLauncherArgs()
 	D("-nosteam");
 	D("-insecure");
 
+	// NOTE: deliberately no -w/-h here. They'd only feed FindVideoMode(),
+	// which snaps to an enumerated video mode, and Android has none to
+	// enumerate - so the stereo resolution is forced further down the chain
+	// instead (engine/sys_getmodes.cpp and shaderapidx9/shaderdevicedx8.cpp).
+
 	// Keep the engine's dormant VR HUD-overlay/distortion-compositing paths
 	// (client_virtualreality.cpp) out of the picture for now - our
 	// ISourceVirtualReality::CompositeHud (vr_sourcevr_xr.cpp) always

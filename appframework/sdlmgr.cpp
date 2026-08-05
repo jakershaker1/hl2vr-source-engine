@@ -419,6 +419,37 @@ private:
 		w = m_pANativeWindow ? ANativeWindow_getWidth( m_pANativeWindow ) : 0;
 		h = m_pANativeWindow ? ANativeWindow_getHeight( m_pANativeWindow ) : 0;
 	}
+
+	// The size the engine should render its (side-by-side stereo) frame at:
+	// exactly two eye swapchains wide, so PresentFrame's per-eye blit into
+	// the OpenXR swapchain is 1:1 with no rescale. Deliberately NOT the
+	// Android window size - that's the Home Space preview panel, a different
+	// size and aspect ratio entirely. Published by openxr_bootstrap.cpp.
+	//
+	// This feeds DisplayedSize(), which is what
+	// ISourceVirtualReality::GetViewportBounds halves per eye. It does NOT
+	// by itself determine the backbuffer the engine allocates - see
+	// engine/sys_getmodes.cpp and shaderapidx9/shaderdevicedx8.cpp, which
+	// have to force that separately; all three must agree.
+	//
+	// Falls back to the real window size before OpenXR has been queried, or
+	// on a non-VR runtime.
+	bool GetVrRenderSize( int &w, int &h )
+	{
+		const char *pEyeW = getenv( "HL2VR_EYE_WIDTH" );
+		const char *pEyeH = getenv( "HL2VR_EYE_HEIGHT" );
+		if ( !pEyeW || !pEyeH )
+			return false;
+
+		int eyeW = atoi( pEyeW );
+		int eyeH = atoi( pEyeH );
+		if ( eyeW <= 0 || eyeH <= 0 )
+			return false;
+
+		w = eyeW * 2;
+		h = eyeH;
+		return true;
+	}
 #else
 	void PlatformSwapBuffers() { SDL_GL_SwapWindow( m_Window ); }
 	void PlatformGetWindowSize( int &w, int &h ) { SDL_GetWindowSize( m_Window, &w, &h ); }
@@ -954,19 +985,18 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 		Error( "CSDLMgr::CreateHiddenGameWindow: eglGetDisplay/eglInitialize failed" );
 
 	// A real window surface bound to the Activity's own ANativeWindow.
-	// Three EGL surface configurations have now been tried: pbuffer,
-	// surfaceless (matching Khronos's hello_xr reference sample exactly -
-	// see org.khronos.openxr.hello_xr.opengles on-device), and this one.
-	// None of the three changed Full Space promotion (still confined to
-	// Home Space in all three) - so surface configuration is not the
-	// blocker; ruled out. Surfaceless is measurably worse though: with no
-	// buffer ever posted to the real ANativeWindow, the system has nothing
-	// to show for the Home Space preview at all (confirmed via device
-	// screenshot - just the system home environment + loading spinner, our
-	// content never appears anywhere, vs. real rendered content behind the
-	// spinner with a window surface). Reverting to this - real content in
-	// Home Space - as the known-good baseline while Full Space promotion
-	// itself needs investigation elsewhere (not EGL surface management).
+	//
+	// Surface configuration turned out to be irrelevant to Full Space
+	// promotion - pbuffer, surfaceless (matching Khronos's hello_xr sample),
+	// and this were all tried while chasing that, and none of them mattered.
+	// The actual cause was elsewhere entirely: swapchain FBOs being created
+	// on a thread with no current EGL context (see PresentFrameBootstrap in
+	// launcher/android/vr_xr_gles.cpp).
+	//
+	// A real window surface is still the right choice, just for a more
+	// mundane reason: it's what feeds Android XR's Home Space preview of the
+	// app. With a surfaceless context nothing is ever posted to the real
+	// ANativeWindow, so that preview stays empty.
 	const EGLint configAttribs[] = {
 		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
 		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
@@ -2383,12 +2413,13 @@ void CSDLMgr::GetMouseDelta( int &x, int &y, bool bIgnoreNextMouseDelta )
 void CSDLMgr::GetNativeDisplayInfo( int nDisplay, uint &nWidth, uint &nHeight, uint &nRefreshHz )
 {
 #if defined( __ANDROID__ )
-	// No SDL video subsystem on Android (see m_pANativeWindow) - report the
-	// real window size if we have one yet, otherwise a placeholder the
-	// caller (CreateGameWindow, when asked for "default" size) will use
-	// until the real per-eye resolution is set explicitly.
+	// No SDL video subsystem on Android (see m_pANativeWindow). Report the
+	// stereo render size so the engine picks a video mode matching the eye
+	// swapchains (see GetVrRenderSize); fall back to the real window size,
+	// then a placeholder, before OpenXR has been queried.
 	int w = 0, h = 0;
-	PlatformGetWindowSize( w, h );
+	if ( !GetVrRenderSize( w, h ) )
+		PlatformGetWindowSize( w, h );
 	nWidth = w > 0 ? (uint)w : 1024;
 	nHeight = h > 0 ? (uint)h : 768;
 	nRefreshHz = 90;
@@ -2441,12 +2472,19 @@ void CSDLMgr::RenderedSize( uint &width, uint &height, bool set )
 	}
 }
 
-void CSDLMgr::DisplayedSize( uint &width, uint &height ) 
+void CSDLMgr::DisplayedSize( uint &width, uint &height )
 {
 	SDLAPP_FUNC;
 
 	int w, h;
+#if defined( __ANDROID__ )
+	// Backbuffer size, which in VR is the stereo render size - not the
+	// on-screen window (see GetVrRenderSize).
+	if ( !GetVrRenderSize( w, h ) )
+		PlatformGetWindowSize( w, h );
+#else
 	PlatformGetWindowSize(w, h);
+#endif
 	width = (uint) w;
 	height = (uint) h;
 }

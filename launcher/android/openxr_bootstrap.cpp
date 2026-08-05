@@ -8,6 +8,7 @@
 
 #include <android/log.h>
 #include <android_native_app_glue.h>
+#include <stdlib.h>
 #include "tier1/strtools.h"
 
 #define XR_USE_PLATFORM_ANDROID
@@ -95,6 +96,52 @@ bool InitOpenXR( struct android_app *app, XrInstance *pInstance, XrSystemId *pSy
 		LOGI( "OpenXR system: %s (vendorId 0x%x, maxLayers %u, orientationTracking %d, positionTracking %d)",
 			systemProps.systemName, systemProps.vendorId, systemProps.graphicsProperties.maxLayerCount,
 			systemProps.trackingProperties.orientationTracking, systemProps.trackingProperties.positionTracking );
+	}
+
+	// Publish the runtime's recommended per-eye render size, so the engine's
+	// backbuffer can be forced to exactly two of them side by side. Consumed
+	// by engine/sys_getmodes.cpp (video mode) and
+	// materialsystem/shaderapidx9/shaderdevicedx8.cpp (the actual D3D
+	// backbuffer allocation), plus CSDLMgr::DisplayedSize which is what
+	// ISourceVirtualReality::GetViewportBounds splits per eye.
+	//
+	// Handed over via env vars - the same convention android_main.cpp already
+	// uses for HL2VR_ANATIVE_WINDOW - because neither the engine nor
+	// appframework may link OpenXR.
+	//
+	// It has to happen here, before the engine thread starts, because the
+	// engine picks its resolution during materialsystem init, long before the
+	// XrSession (and therefore the swapchains) exist. Only the instance and
+	// system ID are needed to ask, so it is available this early. See
+	// StartEngineIfReady in android_main.cpp for why that ordering needs
+	// enforcing rather than assuming.
+	//
+	// Getting this wrong is not subtle: the engine otherwise falls back to a
+	// tiny enumerated video mode (640x480, then 320x240) while
+	// GetViewportBounds hands out 1856x2160 per-eye viewports, so the left
+	// eye is clipped and the right eye lands entirely off-buffer. Each eye
+	// then receives a stretched sliver - a static, per-eye world distortion
+	// that looks like broken projection math even when the projection and
+	// pose math are provably correct.
+	{
+		uint32_t viewCount = 0;
+		if ( XR_SUCCEEDED( xrEnumerateViewConfigurationViews( instance, systemId,
+			XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &viewCount, NULL ) ) && viewCount >= 1 )
+		{
+			XrViewConfigurationView views[2] = { { XR_TYPE_VIEW_CONFIGURATION_VIEW }, { XR_TYPE_VIEW_CONFIGURATION_VIEW } };
+			if ( viewCount > 2 )
+				viewCount = 2;
+			if ( XR_SUCCEEDED( xrEnumerateViewConfigurationViews( instance, systemId,
+				XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, viewCount, &viewCount, views ) ) )
+			{
+				char buf[32];
+				V_snprintf( buf, sizeof( buf ), "%u", views[0].recommendedImageRectWidth );
+				setenv( "HL2VR_EYE_WIDTH", buf, 1 );
+				V_snprintf( buf, sizeof( buf ), "%u", views[0].recommendedImageRectHeight );
+				setenv( "HL2VR_EYE_HEIGHT", buf, 1 );
+				LOGI( "Recommended per-eye render size: %ux%u", views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight );
+			}
+		}
 	}
 
 	*pInstance = instance;

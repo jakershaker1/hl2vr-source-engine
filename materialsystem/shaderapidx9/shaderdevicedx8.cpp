@@ -1765,6 +1765,32 @@ void CShaderDeviceDx8::SetPresentParameters( void* hWnd, int nAdapter, const Sha
 		m_PresentParameters.BackBufferCount = 1;
 	}
 
+#if defined( __ANDROID__ )
+	// Final say on the backbuffer size in VR: it must be exactly two eye
+	// swapchains wide, so each eye's viewport (from
+	// ISourceVirtualReality::GetViewportBounds) lands on a real half of the
+	// buffer and PresentFrame's blit into the OpenXR swapchain is 1:1.
+	//
+	// Everything upstream that could set this gets overridden or ignored:
+	// the engine's mode list is empty on Android so FindVideoMode() snaps to
+	// DefaultVideoMode(), -w/-h only feed that same lookup, and materialsystem
+	// then picks from its own enumerated adapter modes - which don't include
+	// 3712x2160 either, so it settled on 320x240. This is the last link in the
+	// chain and the only one that actually decides the allocation.
+	{
+		const char *pEyeW = getenv( "HL2VR_EYE_WIDTH" );
+		const char *pEyeH = getenv( "HL2VR_EYE_HEIGHT" );
+		if ( pEyeW && pEyeH && atoi( pEyeW ) > 0 && atoi( pEyeH ) > 0 )
+		{
+			m_PresentParameters.BackBufferWidth = atoi( pEyeW ) * 2;
+			m_PresentParameters.BackBufferHeight = atoi( pEyeH );
+			DevMsg( "HL2VR: stereo backbuffer %dx%d (%sx%s per eye)\n",
+				(int)m_PresentParameters.BackBufferWidth, (int)m_PresentParameters.BackBufferHeight,
+				pEyeW, pEyeH );
+		}
+	}
+#endif
+
 	if ( info.m_nAASamples > 0 && ( m_PresentParameters.SwapEffect == D3DSWAPEFFECT_DISCARD ) )
 	{
 		D3DMULTISAMPLE_TYPE multiSampleType = ComputeMultisampleType( info.m_nAASamples );

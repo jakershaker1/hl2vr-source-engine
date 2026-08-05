@@ -30,14 +30,9 @@
 #include "vr_xr_gles.h"
 #include "appframework/ilaunchermgr.h"
 
-#include <android/log.h>
 #include <math.h>
-#include <time.h>
 
 extern ILauncherMgr *g_pLauncherMgr;
-
-#define LOG_TAG "hl2vr.vr"
-#define LOGI( ... ) __android_log_print( ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__ )
 
 namespace
 {
@@ -85,32 +80,46 @@ namespace
 			-m[3][2], -m[3][0],  m[3][1],  m[3][3] );
 	}
 
-	// Same formula sourcevr/sourcevirtualreality.cpp's ComposeProjectionTransform
-	// uses to turn raw per-eye tangent extents into Source's expected
-	// m_ViewToProjection matrix.
-	void ComposeProjectionTransform( float fLeft, float fRight, float fTop, float fBottom,
+	// Off-axis projection from OpenXR's raw per-eye tangent extents.
+	//
+	// This is Khronos's own XrMatrix4x4f_CreateProjection (OpenXR-SDK
+	// src/common/xr_linear.h), D3D branch - i.e. clip space with +Y up and a
+	// [0,1] Z range, which is what Source's D3D9 renderer expects. Taking the
+	// OpenXR tangents directly, rather than reshaping them to fit
+	// sourcevr/sourcevirtualreality.cpp's OpenVR-shaped
+	// ComposeProjectionTransform(left,right,top,bottom), just avoids a
+	// conversion step - the two disagree on the sign of the vertical
+	// off-centre term, and matching the OpenXR reference exactly is the
+	// safer of the two to reason about.
+	//
+	// For what it's worth that sign is moot on this headset: its vertical
+	// frustum is exactly symmetric (measured angleUp=+0.91751,
+	// angleDown=-0.91751), so tanUp+tanDown is 0 and p[1][2] vanishes either
+	// way. The horizontal frustum IS strongly canted (p[0][2] ~= -/+0.253,
+	// mirrored per eye) and that term does matter.
+	void ComposeProjectionTransform( float tanLeft, float tanRight, float tanUp, float tanDown,
 		float zNear, float zFar, float fovScale, VMatrix *pmProj )
 	{
 		if ( fovScale != 1.0f && fovScale > 0.f )
 		{
-			float fFovScaleAdjusted = tanf( atanf( fTop ) / fovScale ) / fTop;
-			fRight *= fFovScaleAdjusted;
-			fLeft *= fFovScaleAdjusted;
-			fTop *= fFovScaleAdjusted;
-			fBottom *= fFovScaleAdjusted;
+			float fFovScaleAdjusted = tanf( atanf( tanUp ) / fovScale ) / tanUp;
+			tanLeft *= fFovScaleAdjusted;
+			tanRight *= fFovScaleAdjusted;
+			tanUp *= fFovScaleAdjusted;
+			tanDown *= fFovScaleAdjusted;
 		}
 
-		float idx = 1.0f / ( fRight - fLeft );
-		float idy = 1.0f / ( fBottom - fTop );
-		float idz = 1.0f / ( zFar - zNear );
-		float sx = fRight + fLeft;
-		float sy = fBottom + fTop;
+		const float tanWidth = tanRight - tanLeft;
+		// tanUp - tanDown (not the reverse): +Y-up clip space, per the
+		// reference's OpenGL/D3D/Metal branch.
+		const float tanHeight = tanUp - tanDown;
+		const float idz = 1.0f / ( zFar - zNear );
 
 		float (*p)[4] = pmProj->m;
-		p[0][0] = 2*idx; p[0][1] = 0;     p[0][2] = sx*idx;    p[0][3] = 0;
-		p[1][0] = 0;     p[1][1] = 2*idy; p[1][2] = sy*idy;    p[1][3] = 0;
-		p[2][0] = 0;     p[2][1] = 0;     p[2][2] = -zFar*idz; p[2][3] = -zFar*zNear*idz;
-		p[3][0] = 0;     p[3][1] = 0;     p[3][2] = -1.0f;     p[3][3] = 0;
+		p[0][0] = 2.0f/tanWidth; p[0][1] = 0;              p[0][2] = ( tanRight + tanLeft ) / tanWidth;  p[0][3] = 0;
+		p[1][0] = 0;             p[1][1] = 2.0f/tanHeight; p[1][2] = ( tanUp + tanDown ) / tanHeight;    p[1][3] = 0;
+		p[2][0] = 0;             p[2][1] = 0;              p[2][2] = -zFar*idz;                          p[2][3] = -zFar*zNear*idz;
+		p[3][0] = 0;             p[3][1] = 0;              p[3][2] = -1.0f;                              p[3][3] = 0;
 	}
 
 	class CSourceVirtualRealityXR : public ISourceVirtualReality
@@ -142,17 +151,6 @@ namespace
 				g_pLauncherMgr->DisplayedSize( w, h );
 			if ( w == 0 ) w = 1280;
 			if ( h == 0 ) h = 720;
-
-			static uint s_lastLoggedW = 0, s_lastLoggedH = 0;
-			static int s_callCount = 0;
-			s_callCount++;
-			if ( w != s_lastLoggedW || h != s_lastLoggedH )
-			{
-				LOGI( "GetViewportBounds: size changed to %ux%u (call #%d)", w, h, s_callCount );
-				s_lastLoggedW = w; s_lastLoggedH = h;
-			}
-			if ( ( s_callCount % 500 ) == 0 )
-				LOGI( "GetViewportBounds: call #%d (heartbeat, uptime %ldms)", s_callCount, (long)clock() * 1000 / CLOCKS_PER_SEC );
 
 			int halfWidth = (int)w / 2;
 			if ( pnWidth ) *pnWidth = halfWidth;
@@ -211,16 +209,14 @@ namespace
 		{
 			VRXR_Fov_t fov = VRXR_GetEyeFov( eEye == VREye_Left ? 0 : 1 );
 
-			// OpenXR: angleUp/angleRight positive, angleDown/angleLeft negative,
-			// Y-up convention. Source's projection formula (copied from the
-			// OpenVR reference) expects Top negative/Bottom positive in a
-			// Y-down convention matching the D3D9 backend - hence the Y flip.
-			float fLeft = tanf( fov.angleLeft );
-			float fRight = tanf( fov.angleRight );
-			float fTop = -tanf( fov.angleUp );
-			float fBottom = -tanf( fov.angleDown );
-
-			ComposeProjectionTransform( fLeft, fRight, fTop, fBottom, zNear, zFar, fovScale, pResult );
+			// Raw OpenXR tangents, passed through unmodified - angleUp/angleRight
+			// positive, angleDown/angleLeft negative. ComposeProjectionTransform
+			// consumes that convention directly (see the note there about why
+			// pre-negating to fit OpenVR's convention was the bug).
+			ComposeProjectionTransform(
+				tanf( fov.angleLeft ), tanf( fov.angleRight ),
+				tanf( fov.angleUp ), tanf( fov.angleDown ),
+				zNear, zFar, fovScale, pResult );
 			return true;
 		}
 

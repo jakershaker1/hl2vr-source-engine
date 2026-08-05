@@ -532,6 +532,39 @@ void CVideoMode_Common::ResetCurrentModeForNewResolution( int nWidth, int nHeigh
 	// assume we won't be overriding the position
 	m_bVROverride = false;
 
+#if defined( __ANDROID__ )
+	// Force the side-by-side stereo backbuffer size, taken straight from the
+	// per-eye size openxr_bootstrap.cpp published (via env var) before the
+	// engine thread started.
+	//
+	// Neither of the normal routes works here. FindVideoMode() above only ever
+	// snaps to an *enumerated* mode, and on Android there's no SDL video
+	// subsystem to enumerate any, so it always lands on DefaultVideoMode()
+	// (640x480) regardless of -w/-h. And the VR override just below can't help
+	// either: it's gated on g_pSourceVR, which isn't registered this early in
+	// init, so both UseVR() and ShouldForceVRActive() are false here.
+	//
+	// Without this the engine rendered into a 640x480 backbuffer while
+	// GetViewportBounds() was handing out 1856x2160 per-eye viewports - the
+	// left eye clipped to 640x480, the right (at x=1856) entirely off-buffer -
+	// so each eye received a 320x480 sliver stretched to 1856x2160. That
+	// showed up as static, per-eye 3D world distortion even though the
+	// projection and pose math were correct.
+	{
+		const char *pEyeW = getenv( "HL2VR_EYE_WIDTH" );
+		const char *pEyeH = getenv( "HL2VR_EYE_HEIGHT" );
+		if ( pEyeW && pEyeH && atoi( pEyeW ) > 0 && atoi( pEyeH ) > 0 )
+		{
+			m_nStereoWidth = atoi( pEyeW );          // per eye
+			m_nStereoHeight = atoi( pEyeH );
+			m_nModeWidth = m_nStereoWidth * 2;       // both eyes side by side
+			m_nModeHeight = m_nStereoHeight;
+			RequestedWindowVideoMode().width = m_nModeWidth;
+			RequestedWindowVideoMode().height = m_nModeHeight;
+		}
+	}
+#endif
+
 	if ( UseVR() || ShouldForceVRActive() )
 	{
 		g_pSourceVR->GetViewportBounds( ISourceVirtualReality::VREye_Left, NULL, NULL, &m_nStereoWidth, &m_nStereoHeight );
