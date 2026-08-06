@@ -411,6 +411,44 @@ bool CLinuxFont::CreateFromMemory(const char *windowsFontName, void *data, int d
 ConVar cl_language( "cl_language", "english", FCVAR_USERINFO, "Language (from HKCU\\Software\\Valve\\Steam\\Language)" );
 
 #if !HAVE_FC
+
+#ifdef ANDROID
+#include <sys/stat.h>
+
+// Resolves an Android font filename to a real path.
+//
+// Prefers the fonts that ship with the game content
+// ($VALVE_GAME_PATH/platform/resource/linux_fonts) - the same set the desktop
+// Linux branch below uses - and only falls back to $APP_DATA_PATH/files, which
+// is where the upstream Android port expects fonts to have been extracted.
+//
+// Without this nothing here resolved on this port at all: game content lives
+// under VALVE_GAME_PATH (the app's external files dir), not APP_DATA_PATH, so
+// every lookup missed, the engine logged "Failed to load custom font file",
+// and no menu or HUD text rendered while the 3D world still drew - which reads
+// as a UI bug rather than a missing asset.
+//
+// pContentName is separate from pLegacyName because the shipped files are
+// lowercase and Android's filesystem is case-sensitive, so e.g.
+// "LiberationMono-Regular.ttf" can never match the shipped
+// "liberationmono-regular.ttf".
+static char *AndroidResolveFontPath( char *pOut, size_t outSize, const char *pContentName, const char *pLegacyName )
+{
+	const char *pGamePath = getenv( "VALVE_GAME_PATH" );
+	if ( pGamePath && pGamePath[0] )
+	{
+		snprintf( pOut, outSize, "%s/platform/resource/linux_fonts/%s", pGamePath, pContentName );
+		struct stat st;
+		if ( stat( pOut, &st ) == 0 )
+			return pOut;
+	}
+
+	const char *pAppData = getenv( "APP_DATA_PATH" );
+	snprintf( pOut, outSize, "%s/files/%s", pAppData ? pAppData : ".", pLegacyName );
+	return pOut;
+}
+#endif // ANDROID
+
 char *TryFindFont(const char *winFontName, bool bBold, int italic)
 {
 	static char fontFile[MAX_PATH];
@@ -422,9 +460,8 @@ char *TryFindFont(const char *winFontName, bool bBold, int italic)
 
 	if( strcmp( winFontName, "Courier New") == 0 )
 	{
-		fontName = "LiberationMono-Regular.ttf";
-		snprintf( fontFile, sizeof fontFile, "%s/files/%s", getenv("APP_DATA_PATH"), fontName);
-		return fontFile;
+		return AndroidResolveFontPath( fontFile, sizeof fontFile,
+			"liberationmono-regular.ttf", "LiberationMono-Regular.ttf" );
 	}
 
 	if( strcmp(lang, "japanese") == 0 ||
@@ -433,15 +470,14 @@ char *TryFindFont(const char *winFontName, bool bBold, int italic)
 		strcmp(lang, "tchinese") == 0 ||
 		strcmp(lang, "schinese") == 0 )
 	{
-		fontName = "DroidSansFallback.ttf"; // for chinese/japanese/korean
-		snprintf( fontFile, sizeof fontFile, "%s/files/%s", getenv("APP_DATA_PATH"), fontName);
-		return fontFile;
+		// for chinese/japanese/korean - not part of the shipped linux_fonts set
+		return AndroidResolveFontPath( fontFile, sizeof fontFile,
+			"DroidSansFallback.ttf", "DroidSansFallback.ttf" );
 	}
 	else if( strcmp(lang, "thai") == 0 )
 	{
-		fontName = "Itim-Regular.otf";
-		snprintf( fontFile, sizeof fontFile, "%s/files/%s", getenv("APP_DATA_PATH"), fontName);
-		return fontFile;
+		return AndroidResolveFontPath( fontFile, sizeof fontFile,
+			"Itim-Regular.otf", "Itim-Regular.otf" );
 	}
 
 	fontName = "dejavusans";
@@ -456,13 +492,15 @@ char *TryFindFont(const char *winFontName, bool bBold, int italic)
 	else if( italic )
 		fontNamePost = "oblique";
 
-	if( fontNamePost )
-		snprintf(fontFile, sizeof fontFile, "%s/files/%s-%s.ttf", getenv("APP_DATA_PATH"), fontName, fontNamePost);
-	else
-		snprintf(fontFile, sizeof fontFile, "%s/files/%s.ttf", getenv("APP_DATA_PATH"), fontName);
+	{
+		char fileName[MAX_PATH];
+		if( fontNamePost )
+			snprintf( fileName, sizeof fileName, "%s-%s.ttf", fontName, fontNamePost );
+		else
+			snprintf( fileName, sizeof fileName, "%s.ttf", fontName );
 
-
-	return fontFile;
+		return AndroidResolveFontPath( fontFile, sizeof fontFile, fileName, fileName );
+	}
 #else
 	bool bRegularPostfix = false;
 	fontName = "dejavusans";

@@ -68,18 +68,19 @@ POSIX file I/O cannot reach arbitrary `/sdcard` paths under scoped storage:
 
 ### Fonts
 
-VGUI looks for these under `<internalDataPath>/files/`:
+Fonts come from the game content you pushed, at
+`<content>/platform/resource/linux_fonts/` — the same set the desktop Linux
+build uses. Nothing extra to install, and nothing font-related is bundled in
+this repo.
 
-- `dejavusans.ttf`
-- `dejavusans-bold.ttf`
-- `LiberationMono-Regular.ttf`
+Upstream's Android font path looked in `$APP_DATA_PATH/files/` instead, which
+is not where this port keeps content, so every lookup missed. It also asked for
+`LiberationMono-Regular.ttf` while the shipped file is
+`liberationmono-regular.ttf` — Android's filesystem is case-sensitive, so that
+one could never resolve either way. Both are handled in
+`AndroidResolveFontPath` (`vgui2/vgui_surfacelib/linuxfont.cpp`), which prefers
+the content directory and falls back to the legacy location.
 
-They are **not** in this repo and are not shipped in the APK yet. Without them
-the engine logs `Failed to load custom font file` and no menu or HUD text
-renders at all (the 3D world still draws, which makes it look like a UI bug
-rather than a missing asset). Until they are bundled, push substitutes:
-
-```bash
-adb push <some>.ttf /data/local/tmp/dejavusans.ttf
-adb shell run-as org.hl2vr.game cp /data/local/tmp/dejavusans.ttf /data/user/0/org.hl2vr.game/files/files/
-```
+Symptom if this ever regresses: `Failed to load custom font file` in logcat and
+**no menu or HUD text at all**, while the 3D world still renders normally — it
+looks like a UI or stereo bug rather than a missing asset.
