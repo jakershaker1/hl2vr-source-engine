@@ -10,6 +10,9 @@
 
 #include <android/log.h>
 #include <GLES3/gl32.h>
+#include <stdlib.h>
+#include <sys/system_properties.h>
+#include <time.h>
 
 extern ILauncherMgr *g_pLauncherMgr;
 extern void (*g_pfnHL2VR_PresentFrame)( unsigned int glTexture, int width, int height );
@@ -264,13 +267,45 @@ namespace
 	// see vr_sourcevr_xr.cpp) already rendered left/right into the left/right
 	// halves of srcTex via CViewSetup viewport bounds, so this is a real
 	// stereo present, not a mono duplicate.
+	double NowMs()
+	{
+		struct timespec ts;
+		clock_gettime( CLOCK_MONOTONIC, &ts );
+		return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+	}
+
 	void PresentFrame( unsigned int srcTex, int width, int height )
 	{
 		if ( !g_Vr.ready )
 			return;
 
+		// Frame-time breakdown, enabled with:
+		//   adb shell setprop debug.hl2vr.frametime 1
+		// Reports where the wall-clock frame actually goes, which the system
+		// perf HUD's "App CPU/GPU time" counters do not account for. Note
+		// the runtime paces a late app to an integer divisor of the display
+		// rate (72/36/18/9), so total frame time is quantised - shaving a few
+		// ms off a frame changes nothing until it crosses a threshold.
+		static int s_timing = -1;
+		if ( s_timing < 0 )
+		{
+			char prop[PROP_VALUE_MAX] = {};
+			s_timing = ( __system_property_get( "debug.hl2vr.frametime", prop ) > 0 && atoi( prop ) != 0 ) ? 1 : 0;
+		}
+
+		static double s_lastPresentEnd = 0.0;
+		static double s_sumEngine = 0.0, s_sumWait = 0.0, s_sumBlit = 0.0, s_sumEnd = 0.0, s_sumTotal = 0.0;
+		static int s_frames = 0;
+
+		const double tEnter = NowMs();
+		// Time from the previous present finishing to this one starting is
+		// everything the engine did: game logic + both eye render passes.
+		const double engineMs = ( s_lastPresentEnd > 0.0 ) ? ( tEnter - s_lastPresentEnd ) : 0.0;
+
 		if ( !DoBeginFrame( g_Vr ) )
 			return; // session not running (headset not worn) - nothing to present
+
+		const double tAfterWait = NowMs();
 
 		glBindFramebuffer( GL_READ_FRAMEBUFFER, g_Vr.srcFbo );
 		glFramebufferTexture2D( GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, srcTex, 0 );
@@ -322,6 +357,8 @@ namespace
 		glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
 		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
 
+		const double tAfterBlit = NowMs();
+
 		XrCompositionLayerProjection projLayer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
 		projLayer.space = g_Vr.localSpace;
 		projLayer.viewCount = 2;
@@ -346,6 +383,30 @@ namespace
 			LOGE( "xrEndFrame failed: XrResult %d", (int)endResult );
 
 		g_Vr.frameOpen = false;
+
+		if ( s_timing )
+		{
+			const double tDone = NowMs();
+			s_sumEngine += engineMs;
+			s_sumWait += tAfterWait - tEnter;      // xrWaitFrame/xrBeginFrame/xrLocateViews
+			s_sumBlit += tAfterBlit - tAfterWait;  // acquire + wait image + 2x blit + release
+			s_sumEnd += tDone - tAfterBlit;        // xrEndFrame
+			s_sumTotal += ( s_lastPresentEnd > 0.0 ) ? ( tDone - s_lastPresentEnd ) : 0.0;
+
+			if ( ++s_frames >= 100 )
+			{
+				const double n = (double)s_frames;
+				LOGI( "frame avg over %d: total=%.1fms | engine(render+logic)=%.1f xrWaitFrame=%.1f blit+swapchain=%.1f xrEndFrame=%.1f",
+					s_frames, s_sumTotal/n, s_sumEngine/n, s_sumWait/n, s_sumBlit/n, s_sumEnd/n );
+				s_sumEngine = s_sumWait = s_sumBlit = s_sumEnd = s_sumTotal = 0.0;
+				s_frames = 0;
+			}
+			s_lastPresentEnd = tDone;
+		}
+		else
+		{
+			s_lastPresentEnd = NowMs();
+		}
 	}
 }
 

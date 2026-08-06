@@ -98,7 +98,15 @@ namespace
 	// back to a 640x480 backbuffer.
 	void StartEngineIfReady( struct android_app *app )
 	{
-		if ( g_bEngineStarted || !g_bOpenXrInitDone || app->window == NULL )
+		// Gate on g_pAcquiredWindow, NOT app->window. The activity is
+		// routinely paused/stopped and its window torn down (APP_CMD_
+		// TERM_WINDOW) while InitOpenXR is still running - xrCreateInstance
+		// takes ~1s binding the runtime broker - so by the time we get here
+		// app->window is often already NULL again. g_pAcquiredWindow holds a
+		// strong ANativeWindow_acquire() reference taken when the window
+		// first appeared, which is exactly what keeps it valid across that,
+		// and is what HL2VR_ANATIVE_WINDOW already points at.
+		if ( g_bEngineStarted || !g_bOpenXrInitDone || g_pAcquiredWindow == NULL )
 			return;
 
 		g_bEngineStarted = true;
@@ -194,11 +202,19 @@ void android_main( struct android_app *app )
 		int events;
 		struct android_poll_source *source;
 
-		// Keep polling (rather than blocking indefinitely) until the VR
-		// session is up, so the g_pLauncherMgr/EGL-ready check below actually
-		// gets a chance to run promptly instead of waiting on the next
-		// incidental Android system event.
-		int timeoutMs = ( g_bEngineStarted && g_bVrSessionReady ) ? -1 : ( g_bEngineStarted ? 50 : 0 );
+		// Block unless there's actually something to poll for.
+		//
+		// The only reason to wake up on a timer is the EGL-ready check below,
+		// which can't be satisfied until the engine thread exists - so before
+		// that, and again once the session is up, just sleep until Android
+		// has an event for us.
+		//
+		// This used to use a 0ms (non-blocking) timeout before the engine
+		// started, i.e. a busy spin. That was survivable in an -O0 build but
+		// pins a core in an optimized one, and starved delivery of
+		// APP_CMD_INIT_WINDOW badly enough that app->window stayed NULL and
+		// the engine never started at all.
+		int timeoutMs = ( g_bEngineStarted && !g_bVrSessionReady ) ? 50 : -1;
 		while ( ALooper_pollOnce( timeoutMs, NULL, &events, (void **)&source ) >= 0 )
 		{
 			if ( source != NULL )

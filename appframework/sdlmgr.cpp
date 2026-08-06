@@ -26,6 +26,7 @@
 #if defined( __ANDROID__ )
 #include <android/native_window.h>
 #include <android/log.h>
+#include <sys/system_properties.h>
 #endif
 
 // NOTE: This has to be the last file included! (turned off below, since this is included like a header)
@@ -408,10 +409,28 @@ private:
 #if defined( __ANDROID__ )
 	void PlatformSwapBuffers()
 	{
-		// Swaps the real window surface, which is what makes our content
-		// visible in Android XR's Home Space preview (see CreateHiddenGameWindow).
-		// Real full-space presentation still happens separately via
-		// g_pfnHL2VR_PresentFrame (called from ShowPixels() before this).
+		// Presents the window surface. Note this is very nearly a no-op that
+		// still costs real time: ShowPixels' blit-to-window path is
+		// #ifdef OSX, so on Android nothing is ever rendered into this
+		// surface - we present an undefined buffer, and eglSwapBuffers can
+		// block on the display's vsync while doing it. Actual presentation
+		// is entirely via g_pfnHL2VR_PresentFrame into the OpenXR swapchain.
+		//
+		// Skippable while investigating frame pacing:
+		//   adb shell setprop debug.hl2vr.skipswap 1
+		// (An earlier attempt at skipping this appeared to stall the render
+		// pipeline, but that was while the swapchain-FBO bug was still
+		// present and nothing was reliable - worth re-measuring.)
+		static int s_skip = -1;
+		if ( s_skip < 0 )
+		{
+			char prop[PROP_VALUE_MAX] = {};
+			s_skip = ( __system_property_get( "debug.hl2vr.skipswap", prop ) > 0 && atoi( prop ) != 0 ) ? 1 : 0;
+			__android_log_print( ANDROID_LOG_INFO, "hl2vr", "PlatformSwapBuffers: skip=%d", s_skip );
+		}
+		if ( s_skip )
+			return;
+
 		_eglSwapBuffers( m_eglDisplay, m_eglSurface );
 	}
 	void PlatformGetWindowSize( int &w, int &h )

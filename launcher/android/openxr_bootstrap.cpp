@@ -9,6 +9,7 @@
 #include <android/log.h>
 #include <android_native_app_glue.h>
 #include <stdlib.h>
+#include <sys/system_properties.h>
 #include "tier1/strtools.h"
 
 #define XR_USE_PLATFORM_ANDROID
@@ -134,12 +135,43 @@ bool InitOpenXR( struct android_app *app, XrInstance *pInstance, XrSystemId *pSy
 			if ( XR_SUCCEEDED( xrEnumerateViewConfigurationViews( instance, systemId,
 				XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, viewCount, &viewCount, views ) ) )
 			{
+				uint32_t eyeW = views[0].recommendedImageRectWidth;
+				uint32_t eyeH = views[0].recommendedImageRectHeight;
+
+				// Optional render-scale, tunable without a rebuild:
+				//   adb shell setprop debug.hl2vr.resscale 0.7
+				// then relaunch. Scales the per-eye render target while
+				// keeping its aspect ratio (aspect is what has to match the
+				// submitted FOV - getting it wrong shears the world), so the
+				// compositor upscales to the swapchain instead of us
+				// rendering native.
+				//
+				// NOTE: this only reduces GPU fill cost. Measured on this
+				// device the app is CPU-bound (app CPU ~47ms vs GPU ~9ms at
+				// full native), so expect little from it until the CPU side
+				// (two full engine render passes per frame through togles'
+				// D3D9->GLES translation) is addressed.
+				char scaleProp[PROP_VALUE_MAX] = {};
+				if ( __system_property_get( "debug.hl2vr.resscale", scaleProp ) > 0 )
+				{
+					float scale = (float)atof( scaleProp );
+					if ( scale > 0.1f && scale < 1.0f )
+					{
+						// Round to a multiple of 8 - some drivers are much
+						// happier with aligned render target dimensions.
+						eyeW = ( (uint32_t)( eyeW * scale ) + 7 ) & ~7u;
+						eyeH = ( (uint32_t)( eyeH * scale ) + 7 ) & ~7u;
+						LOGI( "Applying render scale %.2f", scale );
+					}
+				}
+
 				char buf[32];
-				V_snprintf( buf, sizeof( buf ), "%u", views[0].recommendedImageRectWidth );
+				V_snprintf( buf, sizeof( buf ), "%u", eyeW );
 				setenv( "HL2VR_EYE_WIDTH", buf, 1 );
-				V_snprintf( buf, sizeof( buf ), "%u", views[0].recommendedImageRectHeight );
+				V_snprintf( buf, sizeof( buf ), "%u", eyeH );
 				setenv( "HL2VR_EYE_HEIGHT", buf, 1 );
-				LOGI( "Recommended per-eye render size: %ux%u", views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight );
+				LOGI( "Per-eye render size: %ux%u (runtime recommended %ux%u)",
+					eyeW, eyeH, views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight );
 			}
 		}
 	}
