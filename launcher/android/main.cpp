@@ -71,18 +71,39 @@ void SetLauncherArgs()
 	D("-nosteam");
 	D("-insecure");
 
+	// NOTE: no -vr switch here. The engine-side VR paths are enabled directly
+	// in CEngineAPI (engine/sys_dll2.cpp) on Android instead - this build is
+	// VR-only, and tier0's command-line builder mangles the tail of the
+	// argument list on this platform, so a flag here would not reliably
+	// survive to CheckParm anyway.
+
 	// NOTE: deliberately no -w/-h here. They'd only feed FindVideoMode(),
 	// which snaps to an enumerated video mode, and Android has none to
 	// enumerate - so the stereo resolution is forced further down the chain
 	// instead (engine/sys_getmodes.cpp and shaderapidx9/shaderdevicedx8.cpp).
 
-	// Keep the engine's dormant VR HUD-overlay/distortion-compositing paths
-	// (client_virtualreality.cpp) out of the picture for now - our
-	// ISourceVirtualReality::CompositeHud (vr_sourcevr_xr.cpp) always
-	// returns false since it's a no-op, and DoDistortionProcessing() no-ops
-	// too (the OpenXR runtime's own compositor already handles lens
-	// distortion). Untested combination otherwise; revisit once real VR
-	// HUD rendering is wired up.
+	// The HUD/menu is drawn as a 2D overlay for now, which means it only
+	// appears in the left eye - a single 2D pass draws once into the
+	// side-by-side stereo backbuffer and cannot land in both halves.
+	//
+	// vr_render_hud_in_world=1 selects the engine's in-world HUD quad
+	// instead (RenderHUDQuad in client_virtualreality.cpp), which is drawn
+	// inside each eye's 3D pass and does appear correctly in both. All the
+	// supporting pieces for it are in place and working: the engine-side VR
+	// paths are enabled (sys_dll2.cpp), the _rt_gui render target is created
+	// and the vgui/inworldui materials are supplied procedurally
+	// (vr_sourcevr_xr.cpp), and the quad does render in both eyes.
+	//
+	// It stays off because the quad draws as a missing-texture checkerboard:
+	// sampling a render target does not work through togles on this backend.
+	// Verified by pointing the quad's $basetexture at _rt_FullFrameFB - an
+	// engine render target written every frame - which rendered identically,
+	// so this is not about _rt_gui being unpainted. Material, shader and
+	// texture all report valid (UnlitGeneric, isError=0, $basetexture bound).
+	//
+	// That limitation is not HUD-specific and will also affect water
+	// reflections, refraction, camera monitors and post-processing, so it
+	// wants its own investigation rather than being worked around here.
 	A("+vr_hud_never_overlay", "1");
 	A("+vr_render_hud_in_world", "0");
 

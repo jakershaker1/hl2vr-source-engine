@@ -29,8 +29,16 @@
 #include "sourcevr/isourcevirtualreality.h"
 #include "vr_xr_gles.h"
 #include "appframework/ilaunchermgr.h"
+#include "materialsystem/imaterialsystem.h"
+#include "materialsystem/imaterial.h"
+#include "materialsystem/itexture.h"
+#include "materialsystem/MaterialSystemUtil.h"
+#include "tier1/KeyValues.h"
 
+#include <android/log.h>
 #include <math.h>
+
+#define LOGI( ... ) __android_log_print( ANDROID_LOG_INFO, "hl2vr.vr", __VA_ARGS__ )
 
 extern ILauncherMgr *g_pLauncherMgr;
 
@@ -125,8 +133,15 @@ namespace
 	class CSourceVirtualRealityXR : public ISourceVirtualReality
 	{
 	public:
-		bool Connect( CreateInterfaceFn factory ) override { return true; }
-		void Disconnect() override {}
+		bool Connect( CreateInterfaceFn factory ) override
+		{
+			// Stashed so the HUD materials can be created lazily - see
+			// EnsureHudMaterials.
+			if ( factory )
+				m_pMaterialSystem = (IMaterialSystem *)factory( MATERIAL_SYSTEM_INTERFACE_VERSION, NULL );
+			return true;
+		}
+		void Disconnect() override { m_pMaterialSystem = NULL; }
 		void *QueryInterface( const char *pInterfaceName ) override
 		{
 			if ( !Q_stricmp( pInterfaceName, SOURCE_VIRTUAL_REALITY_INTERFACE_VERSION ) )
@@ -244,7 +259,108 @@ namespace
 
 		bool WillDriftInYaw() override { return false; }
 
-		void CreateRenderTargets( IMaterialSystem *pMaterialSystem ) override {}
+		// Supplies the two materials CClientVirtualReality::RenderHUDQuad()
+		// looks up to draw the HUD/menu quad in world space.
+		//
+		// They don't exist in retail HL2 content: "inworldui" appears in none
+		// of the shipped VPKs (it came with the SDK/VR-era builds), so
+		// FindMaterial returns the error material and the quad draws as the
+		// magenta/black checkerboard. The engine asserts !IsErrorMaterial()
+		// there, but asserts compile out in release.
+		//
+		// Both just sample _rt_gui, the render target
+		// CClientVirtualReality::DrawMainMenu() paints the UI panels into, so
+		// they're trivial to supply procedurally rather than shipping content.
+		//
+		// Called lazily rather than from CreateRenderTargets, because the
+		// engine only calls that `if ( UseVR() )` (matsys_interface.cpp) -
+		// and UseVR() is ShouldRunInVR(), which is false until the OpenXR
+		// session is actually running. The session is created lazily on the
+		// first present, long after render targets are set up, so that hook
+		// never fires for us.
+		void EnsureHudMaterials()
+		{
+			if ( m_bHudMaterialsReady || !m_pMaterialSystem )
+				return;
+
+			struct { const char *pName; bool bTranslucent; } kMaterials[] = {
+				{ "vgui/inworldui",        true  },
+				{ "vgui/inworldui_opaque", false },
+			};
+
+			for ( int i = 0; i < ARRAYSIZE( kMaterials ); i++ )
+			{
+				// Created unconditionally rather than only when the existing
+				// lookup is an error material. FindMaterial() reports
+				// IsErrorMaterial()==false for these even though they are in
+				// none of the shipped VPKs, so that test skipped creation and
+				// left the quad drawing the missing-texture checkerboard.
+				//
+				// CreateMaterial takes ownership of the KeyValues.
+				KeyValues *pVMT = new KeyValues( "UnlitGeneric" );
+				pVMT->SetString( "$basetexture", "_rt_gui" );
+				pVMT->SetInt( "$translucent", kMaterials[i].bTranslucent ? 1 : 0 );
+				pVMT->SetInt( "$vertexcolor", 0 );
+				pVMT->SetInt( "$vertexalpha", 0 );
+				pVMT->SetInt( "$ignorez", 0 );
+				IMaterial *pMat = m_pMaterialSystem->CreateMaterial( kMaterials[i].pName, pVMT );
+
+				// _rt_gui is created just above, so anything that resolved
+				// this material earlier bound a $basetexture that did not
+				// exist yet - re-resolve it now.
+				if ( pMat )
+					pMat->Refresh();
+
+			}
+
+			m_bHudMaterialsReady = true;
+		}
+
+		void CreateRenderTargets( IMaterialSystem *pMaterialSystem ) override
+		{
+			// Called from InitWellKnownRenderTargets (engine/matsys_interface.cpp)
+			// inside the material system's Begin/EndRenderTargetAllocation
+			// phase - render targets have to be created here, not lazily
+			// mid-frame.
+			//
+			// No per-eye *scene* render targets on purpose: GetRenderTarget()
+			// returns NULL so the engine renders into the real backbuffer (see
+			// the file header). What we do create is _rt_gui, the target
+			// CClientVirtualReality::DrawMainMenu() paints the UI panels into
+			// and that the in-world HUD quad's material samples.
+			if ( pMaterialSystem && !m_pMaterialSystem )
+				m_pMaterialSystem = pMaterialSystem;
+
+			if ( !m_pMaterialSystem )
+				return;
+
+			if ( !m_GuiRenderTarget.IsValid() )
+			{
+				// Sized to one eye rather than the reference implementation's
+				// fixed 640x480: DrawMainMenu sizes the VGUI panels from
+				// GetScreenSize() (the per-eye viewport) but paints them into
+				// this target's viewport, so anything smaller clips the menu
+				// to its top-left corner.
+				uint w = 0, h = 0;
+				g_pLauncherMgr->DisplayedSize( w, h );
+				int rtWidth = ( w > 0 ) ? (int)w / 2 : 640;   // DisplayedSize is both eyes
+				int rtHeight = ( h > 0 ) ? (int)h : 480;
+
+				m_GuiRenderTarget.Init( m_pMaterialSystem->CreateNamedRenderTargetTextureEx2(
+					"_rt_gui",
+					rtWidth, rtHeight, RT_SIZE_LITERAL,
+					m_pMaterialSystem->GetBackBufferFormat(),
+					MATERIAL_RT_DEPTH_SHARED,
+					TEXTUREFLAGS_CLAMPS | TEXTUREFLAGS_CLAMPT,
+					0 ) );
+
+				LOGI( "created _rt_gui render target %dx%d (valid=%d)",
+					rtWidth, rtHeight, (int)m_GuiRenderTarget.IsValid() );
+
+			}
+
+			EnsureHudMaterials();
+		}
 		void ShutdownRenderTargets() override {}
 		ITexture *GetRenderTarget( VREye eEye, EWhichRenderTarget eWhich ) override { return NULL; }
 
@@ -262,6 +378,11 @@ namespace
 
 		bool ShouldForceVRMode() override { return true; }
 		void SetShouldForceVRMode() override {}
+
+	private:
+		IMaterialSystem *m_pMaterialSystem = NULL;
+		bool m_bHudMaterialsReady = false;
+		CTextureReference m_GuiRenderTarget;
 	};
 
 	CSourceVirtualRealityXR g_SourceVirtualRealityXR;

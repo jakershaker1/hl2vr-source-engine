@@ -1231,7 +1231,15 @@ void InitWellKnownRenderTargets( void )
 	g_ResolvedFullFrameDepth.Init( CreateResolvedFullFrameDepthTexture() );
 
 	// if we're in stereo mode init a render target for VGUI
-	if( UseVR() )
+	//
+	// ShouldForceVRActive() as well as UseVR(), matching the gating already
+	// used for VR setup in sys_getmodes.cpp. UseVR() is ShouldRunInVR(),
+	// which on the OpenXR backend is false until the XR session is actually
+	// running - and that happens lazily, long after render targets are
+	// allocated. Without this the hook never fired, _rt_gui was never
+	// created, and the in-world HUD quad drew as a missing-texture
+	// checkerboard.
+	if( UseVR() || ShouldForceVRActive() )
 	{
 		g_pSourceVR->CreateRenderTargets( materials );
 	}

@@ -1135,7 +1135,24 @@ void CEngineAPI::SetStartupInfo( StartupInfo_t &info )
 				g_pFileSystem->EnableWhitelistFileTracking( true, false, false );
 			}
 
+#if defined( __ANDROID__ )
+			// This build is VR-only - there is no flat mode to opt out of, so
+			// don't make the engine-side VR paths depend on a -vr command line
+			// switch. (It also isn't reliable here: tier0's
+			// CCommandLine::CreateCmdLine mangles the tail of the argument
+			// list on this platform, leaving tokens like `-vr"` that CheckParm
+			// never matches.)
+			//
+			// This is what assigns the *engine's* g_pSourceVR, via InitVR()
+			// below. Note the client has its own separate g_pSourceVR which is
+			// assigned unconditionally, which is why stereo rendering worked
+			// while every engine-side UseVR()/ShouldForceVRActive() test was
+			// false - including the one guarding CreateRenderTargets(), so the
+			// _rt_gui target the in-world HUD quad samples was never created.
+			m_bSupportsVR = modinfo->GetInt( "supportsvr" ) > 0;
+#else
 			m_bSupportsVR = modinfo->GetInt( "supportsvr" ) > 0 && CommandLine()->CheckParm( "-vr" );
+#endif
 			if ( m_bSupportsVR )
 			{
 				// This also has to happen before CreateGameWindow to know where to put
