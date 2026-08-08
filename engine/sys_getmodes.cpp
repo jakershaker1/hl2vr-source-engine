@@ -561,6 +561,24 @@ void CVideoMode_Common::ResetCurrentModeForNewResolution( int nWidth, int nHeigh
 			m_nModeHeight = m_nStereoHeight;
 			RequestedWindowVideoMode().width = m_nModeWidth;
 			RequestedWindowVideoMode().height = m_nModeHeight;
+
+			// The 2D UI coordinate space (root VGUI panel bounds - see
+			// vgui_baseui_interface.cpp) is one eye, not the whole
+			// side-by-side buffer. VGUI draws once, at the buffer origin, so
+			// sizing it to a full eye makes it land exactly on the left eye's
+			// viewport; leaving it at the default 640x480 left the menu as a
+			// small patch in that eye's top-left corner.
+			//
+			// This is a stopgap: the menu is still monocular, because a single
+			// 2D pass into a side-by-side buffer fundamentally cannot cover
+			// both eyes. Doing it properly means Valve's VR HUD path -
+			// rendering the HUD to its own render target and compositing it
+			// per eye (ISourceVirtualReality::CreateRenderTargets /
+			// GetRenderTarget / CompositeHud, all no-ops in
+			// launcher/android/vr_sourcevr_xr.cpp today) or drawing it in
+			// world space.
+			m_nUIWidth = m_nStereoWidth;
+			m_nUIHeight = m_nStereoHeight;
 		}
 	}
 #endif

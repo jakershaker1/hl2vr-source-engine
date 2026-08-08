@@ -647,7 +647,7 @@ void CEngineVGui::Init()
 	//		staticGameUIPanel ( GameUI stuff ) ( zpos == 100 )
 	//		staticDebugSystemPanel ( Engine debug stuff ) zpos == 125 )
 
-	staticPanel = new CStaticPanel( NULL, "staticPanel" );	
+	staticPanel = new CStaticPanel( NULL, "staticPanel" );
 	staticPanel->SetBounds( 0, 0, videomode->GetModeUIWidth(), videomode->GetModeUIHeight() );
 	staticPanel->SetPaintBorderEnabled(false);
 	staticPanel->SetPaintBackgroundEnabled(false);
@@ -1630,15 +1630,27 @@ void CEngineVGui::Simulate()
 		vgui::GetAnimationController()->UpdateAnimations( Sys_FloatTime() );
 
 		int w, h;
-#if defined( USE_SDL )
+#if defined( ANDROID )
+		// NOTE: this must come before the USE_SDL branch, not after it - both
+		// are defined in the Android build, so an #elif here is dead code.
+		//
+		// The 2D/VGUI viewport is one eye, not the whole side-by-side stereo
+		// buffer: CMatSystemSurface::StartDrawing builds its ortho projection
+		// from whatever viewport is current, so this is what the menu and HUD
+		// get laid out against.
+		//
+		// RenderedSize() (the USE_SDL path) is latched from
+		// NotifyRenderedSize, which nothing sets on Android, so it returned a
+		// stale small value - the menu rendered into a ~320x240 patch in the
+		// top-left corner of the left eye while the 3D world, which sets its
+		// own per-eye viewports, drew correctly.
+		w = videomode->GetModeStereoWidth();
+		h = videomode->GetModeStereoHeight();
+#elif defined( USE_SDL )
 		uint width,height;
 		g_pLauncherMgr->RenderedSize( width, height, false );	// false = get
 		w = width;
 		h = height;
-#elif defined( ANDROID )
-		// no minimizable window concept on Android/VR, always use the mode dimensions
-		w = videomode->GetModeWidth();
-		h = videomode->GetModeHeight();
 #else
 		if ( ::IsIconic( *pmainwindow ) )
 		{
