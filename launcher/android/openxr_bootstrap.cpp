@@ -170,7 +170,21 @@ bool InitOpenXR( struct android_app *app, XrInstance *pInstance, XrSystemId *pSy
 				setenv( "HL2VR_EYE_WIDTH", buf, 1 );
 				V_snprintf( buf, sizeof( buf ), "%u", eyeH );
 				setenv( "HL2VR_EYE_HEIGHT", buf, 1 );
-				LOGI( "Per-eye render size: %ux%u (runtime recommended %ux%u)",
+				// The 2D UI gets its own strip of the backbuffer, which
+				// vr_xr_gles.cpp blits into a separate OpenXR quad layer so it
+				// is never composited into either eye.
+				//
+				// 4:3 rather than 16:9 on purpose: HL2's main menu is laid out
+				// for a 4:3 screen, and CBasePanel::PerformLayout pushes the
+				// menu upwards when it does not fit the available height
+				// ("idealMenuY = tall - menuTall - inset"), which slid it up
+				// underneath the game logo on a short panel.
+				V_snprintf( buf, sizeof( buf ), "%d", 1280 );
+				setenv( "HL2VR_UI_WIDTH", buf, 1 );
+				V_snprintf( buf, sizeof( buf ), "%d", 960 );
+				setenv( "HL2VR_UI_HEIGHT", buf, 1 );
+
+				LOGI( "Per-eye render size: %ux%u (runtime recommended %ux%u), UI panel 1280x960",
 					eyeW, eyeH, views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight );
 			}
 		}

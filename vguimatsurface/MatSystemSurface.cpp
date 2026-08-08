@@ -1948,7 +1948,31 @@ void *CMatSystemSurface::FontDataHelper( const char *pchFontName, int &size, con
 
 		// Just load the font data, decrypt in memory and register for this process
 		CUtlBuffer buf;
-		if ( !g_pFullFileSystem->ReadFile( fontFileName, NULL, buf ) )
+		bool bLoaded = g_pFullFileSystem->ReadFile( fontFileName, NULL, buf );
+
+		if ( !bLoaded )
+		{
+			// Retry lowercased. The schemes ask for "resource/HALFLIFE2.ttf",
+			// "resource/HL2crosshairs.ttf", "resource/BOXROCKET.ttf" etc, but
+			// the files ship lowercase - which only matters on a
+			// case-sensitive filesystem, so this never bit the Windows build.
+			//
+			// Worth fixing rather than ignoring: HALFLIFE2.ttf is a symbol
+			// font whose glyphs *are* the main menu logo, so when it failed to
+			// load the title fell back to a text font and drew as unrelated
+			// letter fragments.
+			char lowerName[MAX_PATH];
+			V_strncpy( lowerName, fontFileName, sizeof( lowerName ) );
+			V_strlower( lowerName );
+
+			if ( V_strcmp( lowerName, fontFileName ) != 0 )
+			{
+				buf.Purge();
+				bLoaded = g_pFullFileSystem->ReadFile( lowerName, NULL, buf );
+			}
+		}
+
+		if ( !bLoaded )
 		{
 			Msg( "Failed to load custom font file '%s'\n", fontFileName );
 			return NULL;
@@ -2524,6 +2548,43 @@ void CMatSystemSurface::DrawPrintText(const wchar_t *text, int iTextLen, FontDra
 //-----------------------------------------------------------------------------
 // Returns the screen size
 //-----------------------------------------------------------------------------
+#if defined( ANDROID )
+#include <sys/system_properties.h>
+#include <stdlib.h>
+
+//-----------------------------------------------------------------------------
+// Reference resolution VGUI's proportional scaling is relative to
+// (CSchemeManager::GetProportionalScaledValue_ uses rootTall / this height).
+//
+// The stock 640x480 base makes every proportional element far larger than
+// intended on the VR UI panel, and that reads much bigger in a headset than on
+// a monitor because the panel subtends a large fixed angle rather than scaling
+// with viewing distance.
+//
+// Tunable without a rebuild, since the comfortable value is a judgement call:
+//   adb shell setprop debug.hl2vr.uibase 600     # larger UI
+//   adb shell setprop debug.hl2vr.uibase 900     # smaller UI
+// The width is kept at a 4:3 ratio to the height, matching the stock base.
+//-----------------------------------------------------------------------------
+void CMatSystemSurface::GetProportionalBase( int &width, int &height )
+{
+	static int s_nBaseHeight = -1;
+	if ( s_nBaseHeight < 0 )
+	{
+		// 1280 against the panel's 960 height gives elements 0.75x their
+		// design size, which reads comfortably in the headset.
+		s_nBaseHeight = 1280;
+
+		char prop[PROP_VALUE_MAX] = {};
+		if ( __system_property_get( "debug.hl2vr.uibase", prop ) > 0 && atoi( prop ) > 0 )
+			s_nBaseHeight = atoi( prop );
+	}
+
+	height = s_nBaseHeight;
+	width = ( s_nBaseHeight * 4 ) / 3;
+}
+#endif
+
 void CMatSystemSurface::GetScreenSize(int &iWide, int &iTall)
 {
 	if ( m_ScreenSizeOverride.m_bActive )

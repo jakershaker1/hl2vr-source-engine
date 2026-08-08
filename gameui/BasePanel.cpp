@@ -5,6 +5,11 @@
 // $NoKeywords: $
 //===========================================================================//
 
+#if defined( ANDROID )
+#include <sys/system_properties.h>
+#include <stdlib.h>
+#endif
+
 #include <stdio.h>
 
 #include "threadtools.h"
@@ -915,13 +920,15 @@ CBasePanel::CBasePanel() : Panel(NULL, "BaseGameUIPanel")
 		}
 	}
 
-	if( IsAndroid() )
-	{
-		AddUrlButton( this, "vgui/\x64\x69\x73\x63\x6f\x72\x64\x5f\x6c\x6f\x67\x6f", "\x68\x74\x74\x70\x73\x3a\x2f\x2f\x64\x69\x73\x63\x6f\x72\x64\x2e\x67\x67\x2f\x68\x5a\x52\x42\x37\x57\x4d\x67\x47\x77" );
-		AddUrlButton( this, "vgui/\x74\x77\x69\x74\x74\x65\x72\x5f\x6c\x6f\x67\x6f", "\x68\x74\x74\x70\x73\x3a\x2f\x2f\x74\x77\x69\x74\x74\x65\x72\x2e\x63\x6f\x6d\x2f\x6e\x69\x6c\x6c\x65\x72\x75\x73\x72" );
-		AddUrlButton( this, "vgui/\x74\x65\x6c\x65\x67\x72\x61\x6d\x5f\x6c\x6f\x67\x6f", "\x68\x74\x74\x70\x73\x3a\x2f\x2f\x74\x2e\x6d\x65\x2f\x6e\x69\x6c\x6c\x65\x72\x75\x73\x72\x5f\x73\x6f\x75\x72\x63\x65" );
-		AddUrlButton( this, "vgui/\x67\x69\x74\x68\x75\x62\x5f\x6c\x6f\x67\x6f", "\x68\x74\x74\x70\x73\x3a\x2f\x2f\x67\x69\x74\x68\x75\x62\x2e\x63\x6f\x6d\x2f\x6e\x69\x6c\x6c\x65\x72\x75\x73\x72\x2f\x73\x6f\x75\x72\x63\x65\x2d\x65\x6e\x67\x69\x6e\x65" );
-	}
+	// NOTE: upstream adds a row of social/promo link buttons here on Android
+	// (their Discord/Twitter/Telegram/GitHub, with the strings hex-escaped in
+	// the source). They are dropped for the VR build:
+	//
+	//  - their vgui/*_logo materials are not in HL2's content, so they drew as
+	//    a row of magenta/black missing-texture blocks across the top of the
+	//    menu panel; and
+	//  - they open a browser via SDL_OpenURL on click, which has nowhere
+	//    sensible to go from an immersive headset.
 }
 
 //-----------------------------------------------------------------------------
@@ -1765,7 +1772,33 @@ void CBasePanel::PerformLayout()
 		idealMenuY = tall - menuTall - m_iGameMenuInset;
 	}
 
+	// NOTE: yDiff is deliberately computed before the Android menu offset
+	// below. The game title buttons are positioned by yDiff, so folding the
+	// offset in here would move the title down with the menu and they would
+	// still overlap - the point of the offset is to separate them.
 	int yDiff = idealMenuY - m_iGameMenuPos.y;
+
+#if defined( ANDROID )
+	// Push the menu down the VR UI panel, away from the game title. The
+	// scheme's position and the clamp above are both tuned for a monitor; on
+	// the panel the menu ends up high enough to run into the logo.
+	//
+	// Applied after the clamp so it is not immediately undone by it, and
+	// tunable without a rebuild since this is a judgement call:
+	//   adb shell setprop debug.hl2vr.menuoffset 200
+	{
+		static int s_nMenuOffset = -1;
+		if ( s_nMenuOffset < 0 )
+		{
+			s_nMenuOffset = 200;
+
+			char prop[PROP_VALUE_MAX] = {};
+			if ( __system_property_get( "debug.hl2vr.menuoffset", prop ) > 0 )
+				s_nMenuOffset = atoi( prop );
+		}
+		idealMenuY += s_nMenuOffset;
+	}
+#endif
 
 	for ( int i=0; i<m_pGameMenuButtons.Count(); ++i )
 	{

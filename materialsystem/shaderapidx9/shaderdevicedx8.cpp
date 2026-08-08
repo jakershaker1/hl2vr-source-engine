@@ -1782,8 +1782,14 @@ void CShaderDeviceDx8::SetPresentParameters( void* hWnd, int nAdapter, const Sha
 		const char *pEyeH = getenv( "HL2VR_EYE_HEIGHT" );
 		if ( pEyeW && pEyeH && atoi( pEyeW ) > 0 && atoi( pEyeH ) > 0 )
 		{
+			// Taller than the eyes: the strip below them is where the 2D UI
+			// is drawn so it stays out of both eye viewports (see
+			// engine/sys_getmodes.cpp and launcher/android/vr_xr_gles.cpp).
+			const char *pUiH = getenv( "HL2VR_UI_HEIGHT" );
+			const int nUiHeight = ( pUiH && atoi( pUiH ) > 0 ) ? atoi( pUiH ) : 720;
+
 			m_PresentParameters.BackBufferWidth = atoi( pEyeW ) * 2;
-			m_PresentParameters.BackBufferHeight = atoi( pEyeH );
+			m_PresentParameters.BackBufferHeight = atoi( pEyeH ) + nUiHeight;
 			DevMsg( "HL2VR: stereo backbuffer %dx%d (%sx%s per eye)\n",
 				(int)m_PresentParameters.BackBufferWidth, (int)m_PresentParameters.BackBufferHeight,
 				pEyeW, pEyeH );

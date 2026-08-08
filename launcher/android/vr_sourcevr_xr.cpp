@@ -161,17 +161,27 @@ namespace
 			// (window/mode setup, not per-eye rendering) only want the size
 			// and pass NULL for pnX/pnY - matches sourcevr/sourcevirtualreality.cpp's
 			// reference implementation's null-checking convention.
-			uint w = 0, h = 0;
-			if ( g_pLauncherMgr )
-				g_pLauncherMgr->DisplayedSize( w, h );
-			if ( w == 0 ) w = 1280;
-			if ( h == 0 ) h = 720;
+			// Taken from the per-eye size directly rather than halving
+			// DisplayedSize: the backbuffer is now taller than the eyes,
+			// carrying a UI strip underneath them (see
+			// engine/sys_getmodes.cpp), so its height is not an eye's height.
+			const char *pEyeW = getenv( "HL2VR_EYE_WIDTH" );
+			const char *pEyeH = getenv( "HL2VR_EYE_HEIGHT" );
+			int eyeWidth = ( pEyeW && atoi( pEyeW ) > 0 ) ? atoi( pEyeW ) : 640;
+			int eyeHeight = ( pEyeH && atoi( pEyeH ) > 0 ) ? atoi( pEyeH ) : 720;
 
-			int halfWidth = (int)w / 2;
-			if ( pnWidth ) *pnWidth = halfWidth;
-			if ( pnHeight ) *pnHeight = (int)h;
-			if ( pnY ) *pnY = 0;
-			if ( pnX ) *pnX = ( eEye == VREye_Left ) ? 0 : halfWidth;
+			// The UI strip occupies the top of the backbuffer, so the eyes
+			// sit below it. VGUI has to own y=0: it sets its own scissor from
+			// (0,0,w,h) in absolute coordinates, so it cannot be given an
+			// offset viewport - the 3D path has no such restriction because
+			// the engine sets per-eye viewports explicitly.
+			const char *pUiH = getenv( "HL2VR_UI_HEIGHT" );
+			const int uiHeight = ( pUiH && atoi( pUiH ) > 0 ) ? atoi( pUiH ) : 720;
+
+			if ( pnWidth ) *pnWidth = eyeWidth;
+			if ( pnHeight ) *pnHeight = eyeHeight;
+			if ( pnY ) *pnY = uiHeight;
+			if ( pnX ) *pnX = ( eEye == VREye_Left ) ? 0 : eyeWidth;
 		}
 
 		bool DoDistortionProcessing( VREye eEye ) override
@@ -336,15 +346,20 @@ namespace
 
 			if ( !m_GuiRenderTarget.IsValid() )
 			{
-				// Sized to one eye rather than the reference implementation's
-				// fixed 640x480: DrawMainMenu sizes the VGUI panels from
-				// GetScreenSize() (the per-eye viewport) but paints them into
-				// this target's viewport, so anything smaller clips the menu
-				// to its top-left corner.
-				uint w = 0, h = 0;
-				g_pLauncherMgr->DisplayedSize( w, h );
-				int rtWidth = ( w > 0 ) ? (int)w / 2 : 640;   // DisplayedSize is both eyes
-				int rtHeight = ( h > 0 ) ? (int)h : 480;
+				// Matches the UI strip of the backbuffer (published by
+				// openxr_bootstrap.cpp, and what the VGUI viewport is set to
+				// in engine/vgui_baseui_interface.cpp), not the reference
+				// implementation's fixed 640x480.
+				//
+				// The size has to agree with the UI viewport: DrawMainMenu
+				// sizes the VGUI panels from GetScreenSize() and then paints
+				// them into this target's viewport, so a target smaller than
+				// the panels clips the menu to its top-left corner - the same
+				// mismatch that put the menu in a corner of the left eye.
+				const char *pUiW = getenv( "HL2VR_UI_WIDTH" );
+				const char *pUiH = getenv( "HL2VR_UI_HEIGHT" );
+				int rtWidth = ( pUiW && atoi( pUiW ) > 0 ) ? atoi( pUiW ) : 1280;
+				int rtHeight = ( pUiH && atoi( pUiH ) > 0 ) ? atoi( pUiH ) : 720;
 
 				m_GuiRenderTarget.Init( m_pMaterialSystem->CreateNamedRenderTargetTextureEx2(
 					"_rt_gui",

@@ -532,57 +532,6 @@ void CVideoMode_Common::ResetCurrentModeForNewResolution( int nWidth, int nHeigh
 	// assume we won't be overriding the position
 	m_bVROverride = false;
 
-#if defined( __ANDROID__ )
-	// Force the side-by-side stereo backbuffer size, taken straight from the
-	// per-eye size openxr_bootstrap.cpp published (via env var) before the
-	// engine thread started.
-	//
-	// Neither of the normal routes works here. FindVideoMode() above only ever
-	// snaps to an *enumerated* mode, and on Android there's no SDL video
-	// subsystem to enumerate any, so it always lands on DefaultVideoMode()
-	// (640x480) regardless of -w/-h. And the VR override just below can't help
-	// either: it's gated on g_pSourceVR, which isn't registered this early in
-	// init, so both UseVR() and ShouldForceVRActive() are false here.
-	//
-	// Without this the engine rendered into a 640x480 backbuffer while
-	// GetViewportBounds() was handing out 1856x2160 per-eye viewports - the
-	// left eye clipped to 640x480, the right (at x=1856) entirely off-buffer -
-	// so each eye received a 320x480 sliver stretched to 1856x2160. That
-	// showed up as static, per-eye 3D world distortion even though the
-	// projection and pose math were correct.
-	{
-		const char *pEyeW = getenv( "HL2VR_EYE_WIDTH" );
-		const char *pEyeH = getenv( "HL2VR_EYE_HEIGHT" );
-		if ( pEyeW && pEyeH && atoi( pEyeW ) > 0 && atoi( pEyeH ) > 0 )
-		{
-			m_nStereoWidth = atoi( pEyeW );          // per eye
-			m_nStereoHeight = atoi( pEyeH );
-			m_nModeWidth = m_nStereoWidth * 2;       // both eyes side by side
-			m_nModeHeight = m_nStereoHeight;
-			RequestedWindowVideoMode().width = m_nModeWidth;
-			RequestedWindowVideoMode().height = m_nModeHeight;
-
-			// The 2D UI coordinate space (root VGUI panel bounds - see
-			// vgui_baseui_interface.cpp) is one eye, not the whole
-			// side-by-side buffer. VGUI draws once, at the buffer origin, so
-			// sizing it to a full eye makes it land exactly on the left eye's
-			// viewport; leaving it at the default 640x480 left the menu as a
-			// small patch in that eye's top-left corner.
-			//
-			// This is a stopgap: the menu is still monocular, because a single
-			// 2D pass into a side-by-side buffer fundamentally cannot cover
-			// both eyes. Doing it properly means Valve's VR HUD path -
-			// rendering the HUD to its own render target and compositing it
-			// per eye (ISourceVirtualReality::CreateRenderTargets /
-			// GetRenderTarget / CompositeHud, all no-ops in
-			// launcher/android/vr_sourcevr_xr.cpp today) or drawing it in
-			// world space.
-			m_nUIWidth = m_nStereoWidth;
-			m_nUIHeight = m_nStereoHeight;
-		}
-	}
-#endif
-
 	if ( UseVR() || ShouldForceVRActive() )
 	{
 		g_pSourceVR->GetViewportBounds( ISourceVirtualReality::VREye_Left, NULL, NULL, &m_nStereoWidth, &m_nStereoHeight );
@@ -627,6 +576,45 @@ void CVideoMode_Common::ResetCurrentModeForNewResolution( int nWidth, int nHeigh
 		// screen because that would show up on the HMD
 		m_bWindowed = true;
 	}
+
+#if defined( __ANDROID__ )
+	// Establish the VR backbuffer layout. Deliberately last: this has to run
+	// after the VR override above, which is written for the OpenVR-era
+	// desktop path and clobbers two things for us:
+	//
+	//  - it forces the UI to 640x480 ("the smallest size the UI in source
+	//    games can handle"), which is why the menu was still being laid out
+	//    at 480p; and
+	//  - it takes the mode size from GetDisplayBounds(), which reports the
+	//    stereo area only and so drops the UI strip from the height.
+	//
+	// The UI here is not squeezed into an eye - it renders into its own strip
+	// of the backbuffer and is composited as an OpenXR quad layer - so it
+	// runs at the strip's native resolution instead.
+	//
+	// This is also the only thing that sets a usable mode at all on Android:
+	// FindVideoMode() above only snaps to an *enumerated* mode and there is no
+	// SDL video subsystem here to enumerate any, so it otherwise lands on
+	// DefaultVideoMode() (640x480) no matter what -w/-h asked for.
+	{
+		const char *pEyeW = getenv( "HL2VR_EYE_WIDTH" );
+		const char *pEyeH = getenv( "HL2VR_EYE_HEIGHT" );
+		const char *pUiW = getenv( "HL2VR_UI_WIDTH" );
+		const char *pUiH = getenv( "HL2VR_UI_HEIGHT" );
+		if ( pEyeW && pEyeH && atoi( pEyeW ) > 0 && atoi( pEyeH ) > 0 )
+		{
+			m_nStereoWidth = atoi( pEyeW );
+			m_nStereoHeight = atoi( pEyeH );
+			m_nUIWidth = ( pUiW && atoi( pUiW ) > 0 ) ? atoi( pUiW ) : 1280;
+			m_nUIHeight = ( pUiH && atoi( pUiH ) > 0 ) ? atoi( pUiH ) : 720;
+
+			m_nModeWidth = m_nStereoWidth * 2;
+			m_nModeHeight = m_nStereoHeight + m_nUIHeight;
+			RequestedWindowVideoMode().width = m_nModeWidth;
+			RequestedWindowVideoMode().height = m_nModeHeight;
+		}
+	}
+#endif
 }
 
 

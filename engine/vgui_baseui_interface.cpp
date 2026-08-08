@@ -1634,18 +1634,20 @@ void CEngineVGui::Simulate()
 		// NOTE: this must come before the USE_SDL branch, not after it - both
 		// are defined in the Android build, so an #elif here is dead code.
 		//
-		// The 2D/VGUI viewport is one eye, not the whole side-by-side stereo
-		// buffer: CMatSystemSurface::StartDrawing builds its ortho projection
-		// from whatever viewport is current, so this is what the menu and HUD
-		// get laid out against.
+		// CMatSystemSurface::StartDrawing builds its ortho projection from
+		// whatever viewport is current, so this is what the menu and HUD get
+		// laid out against. (RenderedSize(), the USE_SDL path below, is
+		// latched from NotifyRenderedSize which nothing calls on Android, so
+		// it returns a stale value.)
 		//
-		// RenderedSize() (the USE_SDL path) is latched from
-		// NotifyRenderedSize, which nothing sets on Android, so it returned a
-		// stale small value - the menu rendered into a ~320x240 patch in the
-		// top-left corner of the left eye while the 3D world, which sets its
-		// own per-eye viewports, drew correctly.
-		w = videomode->GetModeStereoWidth();
-		h = videomode->GetModeStereoHeight();
+		// The UI is drawn into its own strip of the backbuffer, below both
+		// eye viewports, rather than into an eye. That keeps it out of the
+		// stereo images entirely so it can be composited as its own OpenXR
+		// quad layer (launcher/android/vr_xr_gles.cpp) - a 2D pass drawn into
+		// an eye would otherwise appear flat in that eye, and the panel would
+		// just mirror it.
+		w = videomode->GetModeUIWidth();
+		h = videomode->GetModeUIHeight();
 #elif defined( USE_SDL )
 		uint width,height;
 		g_pLauncherMgr->RenderedSize( width, height, false );	// false = get
@@ -1724,6 +1726,42 @@ void CEngineVGui::Paint( PaintMode_t mode )
 		return;
 	}
 
+#if defined( __ANDROID__ )
+	// The UI is composited as a transparent OpenXR quad layer floating in
+	// world space (launcher/android/vr_xr_gles.cpp), so it renders into its
+	// own strip of the backbuffer below both eye viewports rather than into
+	// an eye image.
+	//
+	// The strip is at the TOP of the backbuffer, with the eyes below it, so
+	// this viewport needs no Y offset. That is deliberate: VGUI sets its own
+	// scissor from (0,0,w,h) in absolute coordinates (see
+	// CMatSystemSurface::StartDrawing, "we don't want to include x and y from
+	// the viewport here"), so an offset viewport would have everything it
+	// draws scissored away.
+	//
+	// The UI pass sets the viewport itself rather than inheriting whichever
+	// one was last active, because ClearBuffers below clears the *current*
+	// viewport - clearing while the full backbuffer was bound wiped both eyes
+	// to transparent black every frame.
+	//
+	// It also has to start fully transparent with alpha writes enabled, or
+	// the panel arrives with alpha=1 everywhere and blocks out the scene
+	// behind it. Same pattern CClientVirtualReality::DrawMainMenu uses when
+	// painting into _rt_gui.
+	const bool bQuadLayerUI = ( mode & PAINT_UIPANELS ) != 0;
+	int nSavedX = 0, nSavedY = 0, nSavedW = 0, nSavedH = 0;
+	if ( bQuadLayerUI )
+	{
+		CMatRenderContextPtr pRenderContext( materials );
+		pRenderContext->GetViewport( nSavedX, nSavedY, nSavedW, nSavedH );
+		pRenderContext->Viewport( 0, 0,
+			videomode->GetModeUIWidth(), videomode->GetModeUIHeight() );
+		pRenderContext->OverrideAlphaWriteEnable( true, true );
+		pRenderContext->ClearColor4ub( 0, 0, 0, 0 );
+		pRenderContext->ClearBuffers( true, false );
+	}
+#endif
+
 	// draw from the main panel down
 	vgui::Panel *panel = staticPanel;
 
@@ -1785,6 +1823,15 @@ void CEngineVGui::Paint( PaintMode_t mode )
 	{
 		vgui::surface()->PaintSoftwareCursor();
 	}
+
+#if defined( __ANDROID__ )
+	if ( bQuadLayerUI )
+	{
+		CMatRenderContextPtr pRenderContext( materials );
+		pRenderContext->OverrideAlphaWriteEnable( false, true );
+		pRenderContext->Viewport( nSavedX, nSavedY, nSavedW, nSavedH );
+	}
+#endif
 
 	toolframework->VGui_PostRenderAllTools( mode );
 }

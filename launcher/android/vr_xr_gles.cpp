@@ -35,7 +35,9 @@ namespace
 	// generously rather than pull in std::vector.
 	const uint32_t kMaxSwapchainImages = 8;
 
-	struct Eye
+	// One OpenXR swapchain plus the GL objects needed to blit into it. Used
+	// for the two eye images and for the UI panel layer.
+	struct Swapchain
 	{
 		XrSwapchain swapchain = XR_NULL_HANDLE;
 		uint32_t width = 0, height = 0;
@@ -43,6 +45,7 @@ namespace
 		GLuint images[kMaxSwapchainImages] = {};   // GL textures owned by the runtime
 		GLuint fbos[kMaxSwapchainImages] = {};     // one draw-FBO per image, wrapping it
 	};
+	typedef Swapchain Eye;
 
 	struct VRState
 	{
@@ -55,6 +58,10 @@ namespace
 		bool ready = false;
 
 		Eye eyes[2];
+
+		// The 2D UI (menu/HUD) is presented as its own OpenXR quad layer
+		// rather than as geometry in the scene - see PresentFrame.
+		Swapchain ui;
 
 		// A single FBO wrapping whatever source texture is handed to us this
 		// call, rebound to point at the new texture each frame - cheaper than
@@ -112,6 +119,52 @@ namespace
 		return XrCheck( xrCreateReferenceSpace( vr.session, &spaceInfo, &vr.localSpace ), "xrCreateReferenceSpace" );
 	}
 
+	// Creates one swapchain at the given size and wraps each of its images in
+	// a draw-FBO so we can blit into them.
+	bool CreateOneSwapchain( VRState &vr, Swapchain &out, uint32_t width, uint32_t height, int64_t format )
+	{
+		out.width = width;
+		out.height = height;
+
+		XrSwapchainCreateInfo swapchainInfo = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+		swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+		swapchainInfo.format = format;
+		swapchainInfo.sampleCount = 1;
+		swapchainInfo.width = width;
+		swapchainInfo.height = height;
+		swapchainInfo.faceCount = 1;
+		swapchainInfo.arraySize = 1;
+		swapchainInfo.mipCount = 1;
+		if ( !XrCheck( xrCreateSwapchain( vr.session, &swapchainInfo, &out.swapchain ), "xrCreateSwapchain" ) )
+			return false;
+
+		uint32_t imageCount = 0;
+		xrEnumerateSwapchainImages( out.swapchain, 0, &imageCount, NULL );
+		if ( imageCount > kMaxSwapchainImages )
+		{
+			LOGE( "Swapchain has %u images, more than the %u we support", imageCount, kMaxSwapchainImages );
+			return false;
+		}
+
+		XrSwapchainImageOpenGLESKHR xrImages[kMaxSwapchainImages];
+		for ( uint32_t j = 0; j < imageCount; j++ )
+			xrImages[j] = { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR };
+		if ( !XrCheck( xrEnumerateSwapchainImages( out.swapchain, imageCount, &imageCount,
+			(XrSwapchainImageBaseHeader *)xrImages ), "xrEnumerateSwapchainImages" ) )
+			return false;
+
+		out.imageCount = imageCount;
+		for ( uint32_t j = 0; j < imageCount; j++ )
+		{
+			out.images[j] = xrImages[j].image;
+
+			glGenFramebuffers( 1, &out.fbos[j] );
+			glBindFramebuffer( GL_DRAW_FRAMEBUFFER, out.fbos[j] );
+			glFramebufferTexture2D( GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out.images[j], 0 );
+		}
+		return true;
+	}
+
 	bool CreateSwapchains( VRState &vr )
 	{
 		uint32_t viewCount = 0;
@@ -145,45 +198,22 @@ namespace
 		for ( uint32_t i = 0; i < 2; i++ )
 		{
 			Eye &eye = vr.eyes[i];
-			eye.width = viewConfigViews[i].recommendedImageRectWidth;
-			eye.height = viewConfigViews[i].recommendedImageRectHeight;
-
-			XrSwapchainCreateInfo swapchainInfo = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-			swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-			swapchainInfo.format = chosenFormat;
-			swapchainInfo.sampleCount = 1;
-			swapchainInfo.width = eye.width;
-			swapchainInfo.height = eye.height;
-			swapchainInfo.faceCount = 1;
-			swapchainInfo.arraySize = 1;
-			swapchainInfo.mipCount = 1;
-			if ( !XrCheck( xrCreateSwapchain( vr.session, &swapchainInfo, &eye.swapchain ), "xrCreateSwapchain" ) )
+			if ( !CreateOneSwapchain( vr, eye,
+				viewConfigViews[i].recommendedImageRectWidth,
+				viewConfigViews[i].recommendedImageRectHeight, chosenFormat ) )
 				return false;
+		}
 
-			uint32_t imageCount = 0;
-			xrEnumerateSwapchainImages( eye.swapchain, 0, &imageCount, NULL );
-			if ( imageCount > kMaxSwapchainImages )
-			{
-				LOGE( "Swapchain has %u images, more than the %u we support", imageCount, kMaxSwapchainImages );
+		// UI panel layer, matching the backbuffer strip the engine draws the
+		// 2D UI into (published by openxr_bootstrap.cpp, consumed by
+		// engine/sys_getmodes.cpp) so the blit is 1:1 with no rescale.
+		{
+			const char *pUiW = getenv( "HL2VR_UI_WIDTH" );
+			const char *pUiH = getenv( "HL2VR_UI_HEIGHT" );
+			const uint32_t uiW = ( pUiW && atoi( pUiW ) > 0 ) ? (uint32_t)atoi( pUiW ) : 1280;
+			const uint32_t uiH = ( pUiH && atoi( pUiH ) > 0 ) ? (uint32_t)atoi( pUiH ) : 720;
+			if ( !CreateOneSwapchain( vr, vr.ui, uiW, uiH, chosenFormat ) )
 				return false;
-			}
-
-			XrSwapchainImageOpenGLESKHR xrImages[kMaxSwapchainImages];
-			for ( uint32_t j = 0; j < imageCount; j++ )
-				xrImages[j] = { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR };
-			if ( !XrCheck( xrEnumerateSwapchainImages( eye.swapchain, imageCount, &imageCount,
-				(XrSwapchainImageBaseHeader *)xrImages ), "xrEnumerateSwapchainImages" ) )
-				return false;
-
-			eye.imageCount = imageCount;
-			for ( uint32_t j = 0; j < imageCount; j++ )
-			{
-				eye.images[j] = xrImages[j].image;
-
-				glGenFramebuffers( 1, &eye.fbos[j] );
-				glBindFramebuffer( GL_DRAW_FRAMEBUFFER, eye.fbos[j] );
-				glFramebufferTexture2D( GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, eye.images[j], 0 );
-			}
 		}
 
 		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
@@ -314,6 +344,14 @@ namespace
 		uint32_t eyeImageIndex[2] = { 0, 0 };
 		const int halfWidth = width / 2;
 
+		// Backbuffer layout (see engine/sys_getmodes.cpp): a UI strip across
+		// the top, with the two eyes side by side beneath it. The UI has to be
+		// the one at y=0 because VGUI scissors in absolute coordinates and so
+		// cannot be given an offset viewport.
+		const int uiWidth = (int)g_Vr.ui.width;
+		const int uiHeight = (int)g_Vr.ui.height;
+		const int eyeHeight = height - uiHeight;
+
 		for ( int i = 0; i < 2; i++ )
 		{
 			Eye &eye = g_Vr.eyes[i];
@@ -340,7 +378,8 @@ namespace
 			// projection matrix instead would not (that flips the world but
 			// leaves screen-space HUD alone).
 			glBindFramebuffer( GL_DRAW_FRAMEBUFFER, eye.fbos[eyeImageIndex[i]] );
-			glBlitFramebuffer( srcXMin, 0, srcXMax, height, 0, (GLint)eye.height, (GLint)eye.width, 0,
+			glBlitFramebuffer( srcXMin, uiHeight, srcXMax, uiHeight + eyeHeight,
+				0, (GLint)eye.height, (GLint)eye.width, 0,
 				GL_COLOR_BUFFER_BIT, GL_LINEAR );
 
 			XrSwapchainImageReleaseInfo releaseInfo = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
@@ -354,6 +393,46 @@ namespace
 			projViews[i].subImage.imageRect.extent = { (int32_t)eye.width, (int32_t)eye.height };
 		}
 
+		// The 2D UI (menu/HUD) as its own OpenXR quad layer.
+		//
+		// Source's own in-world HUD quad (RenderHUDQuad in
+		// client_virtualreality.cpp) draws geometry with a material, and that
+		// draw path does not work through togles here - it renders as the
+		// missing-texture checkerboard even when pointed at an ordinary disk
+		// texture that loads correctly, so the fault is the draw path, not
+		// the texture or the render target. That code is 2013 OpenVR-era and
+		// has been dormant for a decade. Rather than repair it, the runtime
+		// composites the UI for us: a quad layer needs no material, no mesh
+		// and no shader, the compositor places it in 3D and handles both eyes
+		// itself, and the panel stays crisp because it is sampled at its own
+		// resolution instead of through our eye textures.
+		//
+		// Source pixels are the left eye's region, which is where the engine
+		// already draws the 2D UI - so for now the UI also still appears flat
+		// in that eye. Giving VGUI its own area of the backbuffer, outside
+		// both eye viewports, is the follow-up that removes the duplicate.
+		bool bUiLayerValid = false;
+		uint32_t uiImageIndex = 0;
+		if ( g_Vr.ui.swapchain != XR_NULL_HANDLE )
+		{
+			XrSwapchainImageAcquireInfo acquireInfo = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+			if ( XR_SUCCEEDED( xrAcquireSwapchainImage( g_Vr.ui.swapchain, &acquireInfo, &uiImageIndex ) ) )
+			{
+				XrSwapchainImageWaitInfo waitImgInfo = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+				waitImgInfo.timeout = XR_INFINITE_DURATION;
+				xrWaitSwapchainImage( g_Vr.ui.swapchain, &waitImgInfo );
+
+				glBindFramebuffer( GL_DRAW_FRAMEBUFFER, g_Vr.ui.fbos[uiImageIndex] );
+				glBlitFramebuffer( 0, 0, uiWidth, uiHeight,
+					0, (GLint)g_Vr.ui.height, (GLint)g_Vr.ui.width, 0,
+					GL_COLOR_BUFFER_BIT, GL_LINEAR );
+
+				XrSwapchainImageReleaseInfo releaseInfo = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+				xrReleaseSwapchainImage( g_Vr.ui.swapchain, &releaseInfo );
+				bUiLayerValid = true;
+			}
+		}
+
 		glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
 		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
 
@@ -363,7 +442,28 @@ namespace
 		projLayer.space = g_Vr.localSpace;
 		projLayer.viewCount = 2;
 		projLayer.views = projViews;
-		const XrCompositionLayerBaseHeader *layers[1] = { (const XrCompositionLayerBaseHeader *)&projLayer };
+
+		// Panel floating in front of the LOCAL space origin (-Z is forward).
+		// Sized to the swapchain's aspect so the UI isn't stretched.
+		XrCompositionLayerQuad uiLayer = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+		uiLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+		uiLayer.space = g_Vr.localSpace;
+		uiLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+		uiLayer.subImage.swapchain = g_Vr.ui.swapchain;
+		uiLayer.subImage.imageRect.offset = { 0, 0 };
+		uiLayer.subImage.imageRect.extent = { (int32_t)g_Vr.ui.width, (int32_t)g_Vr.ui.height };
+		uiLayer.pose.orientation.w = 1.0f;
+		uiLayer.pose.position = { 0.0f, 0.0f, -2.0f };
+		{
+			const float kPanelHeightMeters = 2.0f;
+			const float aspect = ( g_Vr.ui.height > 0 ) ? ( (float)g_Vr.ui.width / (float)g_Vr.ui.height ) : 1.0f;
+			uiLayer.size = { kPanelHeightMeters * aspect, kPanelHeightMeters };
+		}
+
+		const XrCompositionLayerBaseHeader *layers[2] = {
+			(const XrCompositionLayerBaseHeader *)&projLayer,
+			(const XrCompositionLayerBaseHeader *)&uiLayer,
+		};
 
 		XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
 		endInfo.displayTime = g_Vr.frameState.predictedDisplayTime;
@@ -375,7 +475,7 @@ namespace
 		// layers too often; that turned out not to be the cause - see
 		// PresentFrameBootstrap - but submitting unconditionally is harmless
 		// and is what's been tested on-device, so it stays.)
-		endInfo.layerCount = 1;
+		endInfo.layerCount = bUiLayerValid ? 2 : 1;
 		endInfo.layers = layers;
 
 		XrResult endResult = xrEndFrame( g_Vr.session, &endInfo );

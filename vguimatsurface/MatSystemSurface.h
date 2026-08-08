@@ -271,7 +271,11 @@ public:
 
 	// new stuff for Alfreds VGUI2 port!!
 	virtual bool InEngine() { return true; }
+#if defined( ANDROID )
+	void GetProportionalBase( int &width, int &height );
+#else
 	void GetProportionalBase( int &width, int &height ) { width = BASE_WIDTH; height = BASE_HEIGHT; }
+#endif
 	virtual bool HasCursorPosFunctions() { return true; }
 
 	virtual void SetModalPanel(VPANEL );

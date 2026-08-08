@@ -23,11 +23,10 @@ extern ConVar default_fov;
 
 extern IMatSystemSurface *g_pMatSystemSurface;
 
-#ifdef ANDROID
-#define TOUCH_DEFAULT "1"
-#else
+// Off even on Android: this is a VR build with no touchscreen, and the
+// vgui/touch/* materials the on-screen buttons need aren't in HL2's content
+// anyway, so they only ever drew as missing-texture blocks.
 #define TOUCH_DEFAULT "0"
-#endif
 
 extern ConVar sensitivity;
 

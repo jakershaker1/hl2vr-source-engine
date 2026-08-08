@@ -82,30 +82,27 @@ void SetLauncherArgs()
 	// enumerate - so the stereo resolution is forced further down the chain
 	// instead (engine/sys_getmodes.cpp and shaderapidx9/shaderdevicedx8.cpp).
 
-	// The HUD/menu is drawn as a 2D overlay for now, which means it only
-	// appears in the left eye - a single 2D pass draws once into the
-	// side-by-side stereo backbuffer and cannot land in both halves.
+	// Both of the engine's own VR HUD paths stay off. The UI is instead drawn
+	// into its own strip of the backbuffer and composited by the runtime as an
+	// OpenXR quad layer - see launcher/android/vr_xr_gles.cpp.
 	//
-	// vr_render_hud_in_world=1 selects the engine's in-world HUD quad
-	// instead (RenderHUDQuad in client_virtualreality.cpp), which is drawn
-	// inside each eye's 3D pass and does appear correctly in both. All the
-	// supporting pieces for it are in place and working: the engine-side VR
-	// paths are enabled (sys_dll2.cpp), the _rt_gui render target is created
-	// and the vgui/inworldui materials are supplied procedurally
-	// (vr_sourcevr_xr.cpp), and the quad does render in both eyes.
+	// vr_render_hud_in_world=1 would select RenderHUDQuad
+	// (client_virtualreality.cpp), which draws a textured quad in the scene.
+	// That path is broken here: it renders as a missing-texture checkerboard
+	// even when pointed at an ordinary disk texture that loads fine, so the
+	// fault is in its draw path (dynamic mesh + UnlitGeneric under togles),
+	// not the texture or the render target. It is 2013 OpenVR-era code that
+	// has been dormant for a decade; the quad layer replaces it rather than
+	// repairing it, and needs no material, mesh or shader at all.
 	//
-	// It stays off because the quad draws as a missing-texture checkerboard:
-	// sampling a render target does not work through togles on this backend.
-	// Verified by pointing the quad's $basetexture at _rt_FullFrameFB - an
-	// engine render target written every frame - which rendered identically,
-	// so this is not about _rt_gui being unpainted. Material, shader and
-	// texture all report valid (UnlitGeneric, isError=0, $basetexture bound).
-	//
-	// That limitation is not HUD-specific and will also affect water
-	// reflections, refraction, camera monitors and post-processing, so it
-	// wants its own investigation rather than being worked around here.
+	// vr_hud_never_overlay=1 keeps the engine off the overlay/composite path
+	// too, since our ISourceVirtualReality::CompositeHud is a no-op.
 	A("+vr_hud_never_overlay", "1");
 	A("+vr_render_hud_in_world", "0");
+
+	// NOTE: touch controls are disabled by changing TOUCH_DEFAULT in
+	// game/client/touch.cpp rather than with a convar here - see the note
+	// above about the tail of this argument list getting mangled.
 
 #undef A
 #undef D
